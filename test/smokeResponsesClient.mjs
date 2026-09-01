@@ -53,6 +53,7 @@ try {
   await runHttpStreamOverloadRetrySmokeTest(streamResponseText);
   await runHttpStreamOverloadAfterOutputSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
+  await runHttpUnsupportedContinuationSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
   await runManagedAutoFallbackVisibilitySmokeTest(streamResponseText);
@@ -433,6 +434,26 @@ function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
     'backticked managed response failure message classifies'
   );
   assertEqual(
+    isContinuationMissPayload(new Error('Unsupported parameter: `previous_response_id`')),
+    true,
+    'unsupported previous response parameter classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload({ status: 400, error: { detail: 'Unsupported parameter: previous_response_id' } }),
+    true,
+    'nested unsupported parameter detail classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('400 {"detail":"Unsupported parameter: previous_response_id"}')),
+    true,
+    'status-prefixed JSON unsupported parameter detail classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('Backend prose mentioned Unsupported parameter: previous_response_id during diagnostics.')),
+    false,
+    'surrounding unsupported parameter prose does not classify'
+  );
+  assertEqual(
     isContinuationMissPayload(new Error('Backend prose mentioned Invalid previous_response_id. during diagnostics.')),
     false,
     'surrounding invalid previous response prose does not classify'
@@ -710,6 +731,50 @@ async function runHttpContinuationMissSmokeTest(streamResponseText, isResponsesC
     assertEqual(capturedError.previousResponseId, 'resp_http_missing', 'structured HTTP response id');
     assertEqual(capturedError.message, 'Responses API could not find previous_response_id.', 'structured HTTP message is fixed');
     assertEqual(requestCount, 1, 'structured HTTP miss is not retried by the client');
+  } finally {
+    server.close();
+  }
+}
+
+async function runHttpUnsupportedContinuationSmokeTest(streamResponseText, isResponsesContinuationMissError) {
+  let requestCount = 0;
+  const server = createServer(async (request, response) => {
+    requestCount += 1;
+    for await (const _chunk of request) {
+      // Consume the request before returning the real ChatGPT Codex backend error shape.
+    }
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ detail: 'Unsupported parameter: previous_response_id' }));
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    let capturedError;
+    try {
+      await streamResponseText({
+        baseURL: `http://127.0.0.1:${address.port}/backend-api/codex/responses`,
+        apiKey: 'test-api-key',
+        headers: createHeaders(),
+        transport: 'http',
+        previousResponseId: 'resp_http_unsupported',
+        omitMaxOutputTokens: true,
+        model: 'gpt-5.6-sol',
+        instructions: 'Smoke test instructions',
+        input: [{ role: 'user', content: 'Continue.' }],
+        maxOutputTokens: 32,
+        token: createCancellationToken(),
+        onTextDelta() {}
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(isResponsesContinuationMissError(capturedError), true, 'unsupported HTTP parameter classifies');
+    assertEqual(capturedError.previousResponseId, 'resp_http_unsupported', 'unsupported HTTP response id');
+    assertEqual(capturedError.message, 'Responses API could not find previous_response_id.', 'unsupported HTTP message is fixed');
+    assertEqual(requestCount, 1, 'unsupported HTTP continuation is not retried by the SDK');
   } finally {
     server.close();
   }

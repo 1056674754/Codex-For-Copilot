@@ -60,7 +60,8 @@ const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
 const PREVIOUS_RESPONSE_ID_PARAM = 'previous_response_id';
-const INVALID_PREVIOUS_RESPONSE_ID_MESSAGE = 'Invalid previous_response_id.';
+const INVALID_PREVIOUS_RESPONSE_ID_MESSAGE = 'Invalid previous_response_id';
+const UNSUPPORTED_PREVIOUS_RESPONSE_ID_MESSAGE = 'Unsupported parameter: previous_response_id';
 const CONTINUATION_MISS_MESSAGE = 'Responses API could not find previous_response_id.';
 const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
@@ -203,7 +204,9 @@ export function isResponsesContinuationMissPayload(error: unknown): boolean {
   let matched = false;
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
-      matched = value.trim().replaceAll('`', '') === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE;
+      const normalized = value.trim().replaceAll('`', '').replace(/\.$/, '');
+      matched = normalized === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE
+        || normalized === UNSUPPORTED_PREVIOUS_RESPONSE_ID_MESSAGE;
       return !matched;
     }
     if (typeof value !== 'object' || value === null) {
@@ -1416,7 +1419,7 @@ function walkErrorEnvelope(error: unknown, visit: (value: unknown) => boolean): 
       continue;
     }
 
-    for (const property of ['error', 'cause', 'message'] as const) {
+    for (const property of ['error', 'cause', 'message', 'detail'] as const) {
       const nested = readOwnErrorProperty(current.value, property);
       if (nested !== undefined && nested !== null && nested !== UNREADABLE_ERROR_PROPERTY) {
         queue.push({ value: nested, depth: current.depth + 1 });
@@ -1431,14 +1434,16 @@ function parseBoundedErrorJson(message: string): unknown | undefined {
   }
 
   const trimmed = message.trim();
-  const looksLikeObject = trimmed.startsWith('{') && trimmed.endsWith('}');
-  const looksLikeArray = trimmed.startsWith('[') && trimmed.endsWith(']');
+  const statusPrefixedJson = /^\d{3}\s+([\[{].*)$/s.exec(trimmed)?.[1];
+  const candidate = statusPrefixedJson ?? trimmed;
+  const looksLikeObject = candidate.startsWith('{') && candidate.endsWith('}');
+  const looksLikeArray = candidate.startsWith('[') && candidate.endsWith(']');
   if (!looksLikeObject && !looksLikeArray) {
     return undefined;
   }
 
   try {
-    return JSON.parse(trimmed);
+    return JSON.parse(candidate);
   } catch {
     return undefined;
   }
