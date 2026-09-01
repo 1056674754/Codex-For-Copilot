@@ -50,6 +50,8 @@ try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpStreamRateLimitRetrySmokeTest(streamResponseText);
   await runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText);
+  await runHttpStreamOverloadRetrySmokeTest(streamResponseText);
+  await runHttpStreamOverloadAfterOutputSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runFunctionCallArgumentsDoneSmokeTest(streamResponseText);
   await runAutoFallbackSmokeTest(streamResponseText);
@@ -254,6 +256,76 @@ async function runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText) {
   }
 }
 
+async function runHttpStreamOverloadRetrySmokeTest(streamResponseText) {
+  let requestCount = 0;
+  const retryReasons = [];
+  const failures = [];
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      writeSseFailedResponse(response, 'server_error', 'Our servers are currently overloaded. Please try again in 1ms.');
+      return;
+    }
+    writeSseResponse(response, ['recovered']);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    const deltas = [];
+    await streamResponseText({
+      ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+      maxRetries: 3,
+      onTextDelta: (text) => deltas.push(text),
+      onResponseFailed: (message) => failures.push(message),
+      onTransportMetrics: (metrics) => {
+        if (metrics.retryReason) retryReasons.push(metrics.retryReason);
+      }
+    });
+
+    assertEqual(requestCount, 2, 'HTTP in-stream overload retries before visible output');
+    assertEqual(deltas.join(''), 'recovered', 'HTTP overload retry returns the recovered response');
+    assertEqual(JSON.stringify(retryReasons), JSON.stringify(['stream_server_overloaded']), 'HTTP overload retry reason');
+    assertEqual(failures.length, 0, 'recovered HTTP overload is not reported as terminal');
+  } finally {
+    server.close();
+  }
+}
+
+async function runHttpStreamOverloadAfterOutputSmokeTest(streamResponseText) {
+  let requestCount = 0;
+  const failures = [];
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write('data: {"type":"response.output_text.delta","delta":"visible"}\n\n');
+    response.write('data: {"type":"response.failed","response":{"id":"resp_overloaded","status":"failed","error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again in 1ms."}}}\n\n');
+    response.end('data: [DONE]\n\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const address = server.address();
+    let capturedError;
+    try {
+      await streamResponseText({
+        ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+        maxRetries: 3,
+        onTextDelta() {},
+        onResponseFailed: (message) => failures.push(message)
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    assertEqual(requestCount, 1, 'HTTP overload after visible output is not retried');
+    assertEqual(capturedError?.message.includes('remained overloaded'), true, 'HTTP overload surfaces after visible output');
+    assertEqual(failures.length, 1, 'unsafe HTTP overload is reported as terminal');
+  } finally {
+    server.close();
+  }
+}
+
 async function runWebSocketStreamRateLimitRetrySmokeTest(streamResponseText) {
   let requestCount = 0;
   let connectionCount = 0;
@@ -354,6 +426,11 @@ function runContinuationMissClassifierSmokeTest(isContinuationMissPayload) {
     isContinuationMissPayload(new Error('Invalid previous_response_id.')),
     true,
     'managed response failure message classifies'
+  );
+  assertEqual(
+    isContinuationMissPayload(new Error('Invalid `previous_response_id`.')),
+    true,
+    'backticked managed response failure message classifies'
   );
   assertEqual(
     isContinuationMissPayload(new Error('Backend prose mentioned Invalid previous_response_id. during diagnostics.')),

@@ -1,14 +1,14 @@
 {
   "name": "codex-for-copilot",
-  "displayName": "Codex For Copilot - Use your Codex with VS Code Agent",
+  "displayName": "Codex For Copilot (Song Patched)",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
   "version": "1.8.1",
-  "publisher": "Gaussian",
+  "publisher": "song-local",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GaussianGuaicai/Codex-For-Copilot.git"
+    "url": "https://github.com/1056674754/Codex-For-Copilot.git"
   },
   "engines": {
     "vscode": "^1.104.0"
@@ -212,6 +212,13 @@
             "Always use the Responses WebSocket path and surface any transport error directly."
           ],
           "description": "Transport policy used for Responses streaming requests."
+        },
+        "codexModelProvider.maxRetries": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum retry count for transient connection, timeout, rate-limit, 5xx, and in-stream server-overload failures before visible output is emitted."
         },
         "codexModelProvider.websocketPrewarm": {
           "type": "string",

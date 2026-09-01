@@ -890,6 +890,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         headers: credentials.headers,
         authManager: credentials.authManager,
         transport: config.transport,
+        maxRetries: config.maxRetries,
         compatibilityProfile,
         identity: requestIdentity,
         turnState: branchState.turn.stickyState,

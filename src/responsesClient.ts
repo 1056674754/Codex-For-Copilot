@@ -66,6 +66,8 @@ const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
 const MAX_ERROR_JSON_LENGTH = 16 * 1024;
 const STREAM_RATE_LIMIT_MAX_RETRIES = 1;
+const STREAM_OVERLOAD_BASE_DELAY_MS = 500;
+const STREAM_OVERLOAD_MAX_DELAY_MS = 8_000;
 const UNREADABLE_ERROR_PROPERTY = Symbol('unreadableErrorProperty');
 
 interface ReusableResponsesWebSocketSession {
@@ -120,6 +122,7 @@ export interface StreamResponseTextOptions {
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
   transport?: 'auto' | 'http' | 'websocket';
+  maxRetries?: number;
   compatibilityProfile?: CodexCompatibilityProfile;
   identity?: CodexRequestIdentity;
   turnState?: string;
@@ -200,7 +203,7 @@ export function isResponsesContinuationMissPayload(error: unknown): boolean {
   let matched = false;
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
-      matched = value.trim() === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE;
+      matched = value.trim().replaceAll('`', '') === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE;
       return !matched;
     }
     if (typeof value !== 'object' || value === null) {
@@ -294,13 +297,24 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         await streamResponseTextOnce(trackedOptions, abortController);
         return;
       } catch (error) {
-        if (!(error instanceof ResponsesStreamRateLimitError)
-          || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
-          || visibleActivity) {
-          throw error;
+        if (error instanceof ResponsesStreamRateLimitError
+          && attempt < STREAM_RATE_LIMIT_MAX_RETRIES
+          && !visibleActivity) {
+          options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
+          await waitForRetryDelay(error.retryDelayMs, abortController.signal);
+          continue;
         }
-        options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
-        await waitForRetryDelay(error.retryDelayMs, abortController.signal);
+        if (error instanceof ResponsesStreamOverloadError
+          && attempt < (options.maxRetries ?? OPENAI_DEFAULT_MAX_RETRIES)
+          && !visibleActivity) {
+          options.onTransportMetrics?.({ retryReason: 'stream_server_overloaded' });
+          await waitForRetryDelay(
+            error.retryDelayMs ?? getOverloadRetryDelayMs(attempt),
+            abortController.signal
+          );
+          continue;
+        }
+        throw error;
       }
     }
   } catch (error) {
@@ -340,6 +354,9 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
     }
 
     if (error instanceof ResponsesStreamRateLimitError) {
+      options.onResponseFailed?.(error.message);
+    }
+    if (error instanceof ResponsesStreamOverloadError) {
       options.onResponseFailed?.(error.message);
     }
     throw normalizeResponsesError(error, options.baseURL);
@@ -398,7 +415,7 @@ async function streamResponseTextOverHttp(
     {
       headers,
       signal: abortController.signal,
-      maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
+      maxRetries: options.maxRetries ?? OPENAI_DEFAULT_MAX_RETRIES,
       timeout: OPENAI_DEFAULT_TIMEOUT_MS
     }
   );
@@ -887,7 +904,7 @@ function evictReusableWebSocketSessions(): void {
 }
 
 function createOpenAIClient(
-  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics'>,
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics' | 'maxRetries'>,
   defaultHeaders?: Record<string, string>
 ): OpenAI {
   const compressedFetch = createCodexFetchAdapter({
@@ -912,7 +929,7 @@ function createOpenAIClient(
     baseURL: normalizeBaseURL(options.baseURL),
     ...(defaultHeaders ? { defaultHeaders } : {}),
     fetch: customFetch,
-    maxRetries: OPENAI_DEFAULT_MAX_RETRIES,
+    maxRetries: options.maxRetries ?? OPENAI_DEFAULT_MAX_RETRIES,
     timeout: OPENAI_DEFAULT_TIMEOUT_MS
   });
 }
@@ -1299,6 +1316,13 @@ function handleResponsesServerEvent(
       );
     }
 
+    if (isResponsesOverloadPayload(error)) {
+      throw new ResponsesStreamOverloadError(
+        error?.message ?? 'Responses API servers are currently overloaded.',
+        parseRetryDelayMs(error?.message)
+      );
+    }
+
     if (error?.code === 'rate_limit_exceeded') {
       throw new ResponsesStreamRateLimitError(
         error.message ?? 'Responses API rate limit exceeded.',
@@ -1465,6 +1489,33 @@ class ResponsesStreamRateLimitError extends Error {
   }
 }
 
+class ResponsesStreamOverloadError extends Error {
+  constructor(message: string, readonly retryDelayMs?: number) {
+    super(message);
+    this.name = 'ResponsesStreamOverloadError';
+  }
+}
+
+function isResponsesOverloadPayload(error: unknown): boolean {
+  let matched = false;
+  walkErrorEnvelope(error, (value) => {
+    if (typeof value === 'string') {
+      matched = /\b(?:servers? (?:are )?currently overloaded|server overloaded|service unavailable|temporarily unavailable)\b/i.test(value);
+      return !matched;
+    }
+    if (typeof value !== 'object' || value === null) {
+      return true;
+    }
+    const code = readOwnErrorProperty(value, 'code');
+    matched = code === 'server_error'
+      || code === 'server_overloaded'
+      || code === 'overloaded'
+      || code === 'temporarily_unavailable';
+    return !matched;
+  });
+  return matched;
+}
+
 function parseRetryDelayMs(message: string | null | undefined): number | undefined {
   const match = message?.match(/\btry again in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?)\b/i);
   if (!match) {
@@ -1492,6 +1543,12 @@ async function waitForRetryDelay(delayMs: number | undefined, signal: AbortSigna
       resolve();
     }
   });
+}
+
+function getOverloadRetryDelayMs(attempt: number): number {
+  const exponentialDelay = Math.min(STREAM_OVERLOAD_MAX_DELAY_MS, STREAM_OVERLOAD_BASE_DELAY_MS * (2 ** attempt));
+  const jitter = 0.8 + Math.random() * 0.4;
+  return Math.round(exponentialDelay * jitter);
 }
 
 export async function countInputTokens(options: CountInputTokensOptions): Promise<number> {
@@ -1565,6 +1622,13 @@ function normalizeResponsesError(error: unknown, baseURL: string): Error {
   if (error instanceof ResponsesStreamRateLimitError) {
     return new Error(
       `OpenAI rate limit exceeded while contacting ${endpoint}. ${error.message}`,
+      { cause: error }
+    );
+  }
+
+  if (error instanceof ResponsesStreamOverloadError) {
+    return new Error(
+      `OpenAI servers remained overloaded while contacting ${endpoint} after bounded retries. ${error.message}`,
       { cause: error }
     );
   }
