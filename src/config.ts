@@ -48,7 +48,7 @@ export function getProviderConfig(): ProviderConfig {
     clientVersion: config.get('clientVersion', '0.0.0'),
     credentialsSource: config.get('credentialsSource', 'auto'),
     transport: normalizeTransport(config.get('transport', 'auto')),
-    maxRetries: normalizeMaxRetries(config.get('maxRetries', 5)),
+    maxRetries: normalizeMaxRetries(config.get('maxRetries', 15)),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
     protocol: {
@@ -102,9 +102,9 @@ function normalizeNativeToolSearchMaxToolsPerNamespace(value: unknown): number {
 
 function normalizeMaxRetries(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 5;
+    return 15;
   }
-  return Math.min(10, Math.max(0, Math.floor(value)));
+  return Math.min(15, Math.max(0, Math.floor(value)));
 }
 
 function normalizeWebSearchContextSize(value: unknown): WebSearchConfig['contextSize'] {

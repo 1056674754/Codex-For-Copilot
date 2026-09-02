@@ -50,6 +50,7 @@ try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpStreamRateLimitRetrySmokeTest(streamResponseText);
   await runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText);
+  await runHttpStatusOverloadRetrySmokeTest(streamResponseText);
   await runHttpStreamOverloadRetrySmokeTest(streamResponseText);
   await runHttpStreamOverloadAfterOutputSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
@@ -172,6 +173,7 @@ async function runNestedConnectionCauseSmokeTest(streamResponseText) {
       instructions: 'Smoke test instructions',
       input: [{ role: 'user', content: 'Ping' }],
       maxOutputTokens: 32,
+      maxRetries: 2,
       token: createCancellationToken(),
       onTextDelta() {}
     });
@@ -272,24 +274,94 @@ async function runHttpStreamOverloadRetrySmokeTest(streamResponseText) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
   try {
-    const address = server.address();
-    const deltas = [];
-    await streamResponseText({
-      ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
-      maxRetries: 3,
-      onTextDelta: (text) => deltas.push(text),
-      onResponseFailed: (message) => failures.push(message),
-      onTransportMetrics: (metrics) => {
-        if (metrics.retryReason) retryReasons.push(metrics.retryReason);
-      }
+    const retryDelays = await withImmediateLongRetryTimers(async () => {
+      const address = server.address();
+      const deltas = [];
+      await streamResponseText({
+        ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+        maxRetries: 3,
+        onTextDelta: (text) => deltas.push(text),
+        onResponseFailed: (message) => failures.push(message),
+        onTransportMetrics: (metrics) => {
+          if (metrics.retryReason) retryReasons.push(metrics.retryReason);
+        }
+      });
+      assertEqual(deltas.join(''), 'recovered', 'HTTP overload retry returns the recovered response');
     });
 
     assertEqual(requestCount, 2, 'HTTP in-stream overload retries before visible output');
-    assertEqual(deltas.join(''), 'recovered', 'HTTP overload retry returns the recovered response');
     assertEqual(JSON.stringify(retryReasons), JSON.stringify(['stream_server_overloaded']), 'HTTP overload retry reason');
+    assertEqual(JSON.stringify(retryDelays), JSON.stringify([10_000]), 'HTTP in-stream overload waits at least 10 seconds');
     assertEqual(failures.length, 0, 'recovered HTTP overload is not reported as terminal');
   } finally {
     server.close();
+  }
+}
+
+async function runHttpStatusOverloadRetrySmokeTest(streamResponseText) {
+  let requestCount = 0;
+  const retryReasons = [];
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    if (requestCount <= 15) {
+      response.writeHead(503, {
+        'content-type': 'application/json',
+        'retry-after-ms': '1'
+      });
+      response.end(JSON.stringify({
+        error: {
+          type: 'server_error',
+          message: 'Our servers are currently overloaded. Please try again later.'
+        }
+      }));
+      return;
+    }
+    writeSseResponse(response, ['recovered']);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const retryDelays = await withImmediateLongRetryTimers(async () => {
+      const address = server.address();
+      const deltas = [];
+      await streamResponseText({
+        ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+        onTextDelta: (text) => deltas.push(text),
+        onTransportMetrics: (metrics) => {
+          if (metrics.retryReason) retryReasons.push(metrics.retryReason);
+        }
+      });
+      assertEqual(deltas.join(''), 'recovered', 'HTTP status overload returns the recovered response');
+    });
+
+    assertEqual(requestCount, 16, 'HTTP status overload uses the default 15-retry budget');
+    assertEqual(retryDelays.length, 15, 'HTTP status overload waits before all 15 retries');
+    assertEqual(retryDelays.every((delay) => delay >= 10_000), true, 'HTTP status overload waits at least 10 seconds per retry');
+    assertEqual(
+      retryReasons.filter((reason) => reason === 'http_server_overloaded').length,
+      15,
+      'HTTP status overload reports each protected retry'
+    );
+  } finally {
+    server.close();
+  }
+}
+
+async function withImmediateLongRetryTimers(run) {
+  const originalSetTimeout = globalThis.setTimeout;
+  const retryDelays = [];
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (Number(delay) >= 10_000 && Number(delay) <= 60_000) {
+      retryDelays.push(Number(delay));
+      return originalSetTimeout(callback, 0, ...args);
+    }
+    return originalSetTimeout(callback, delay, ...args);
+  };
+  try {
+    await run();
+    return retryDelays;
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
   }
 }
 

@@ -50,7 +50,7 @@ import {
   type WebSearchSource
 } from './hostedTools/hostedToolEvents';
 
-const OPENAI_DEFAULT_MAX_RETRIES = 2;
+const OPENAI_DEFAULT_MAX_RETRIES = 15;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const REUSABLE_WEBSOCKET_TTL_MS = 10 * 60 * 1000;
 const MAX_REUSABLE_WEBSOCKETS = 32;
@@ -67,8 +67,8 @@ const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
 const MAX_ERROR_JSON_LENGTH = 16 * 1024;
 const STREAM_RATE_LIMIT_MAX_RETRIES = 1;
-const STREAM_OVERLOAD_BASE_DELAY_MS = 500;
-const STREAM_OVERLOAD_MAX_DELAY_MS = 8_000;
+const OVERLOAD_MIN_RETRY_DELAY_MS = 10_000;
+const OPENAI_MAX_RETRY_AFTER_MS = 60_000;
 const UNREADABLE_ERROR_PROPERTY = Symbol('unreadableErrorProperty');
 
 interface ReusableResponsesWebSocketSession {
@@ -312,7 +312,7 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
           && !visibleActivity) {
           options.onTransportMetrics?.({ retryReason: 'stream_server_overloaded' });
           await waitForRetryDelay(
-            error.retryDelayMs ?? getOverloadRetryDelayMs(attempt),
+            getOverloadRetryDelayMs(error.retryDelayMs),
             abortController.signal
           );
           continue;
@@ -924,9 +924,13 @@ function createOpenAIClient(
       responseStatus: observation.responseStatus
     })
   });
-  const customFetch: typeof fetch = options.authManager
+  const baseFetch: typeof fetch = options.authManager
     ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch)
     : compressedFetch;
+  const customFetch: typeof fetch = async (input, init) => {
+    const response = await baseFetch(input, init);
+    return enforceMinimumServerRetryDelay(response, options.onTransportMetrics);
+  };
   return new OpenAI({
     apiKey: options.apiKey,
     baseURL: normalizeBaseURL(options.baseURL),
@@ -1550,10 +1554,59 @@ async function waitForRetryDelay(delayMs: number | undefined, signal: AbortSigna
   });
 }
 
-function getOverloadRetryDelayMs(attempt: number): number {
-  const exponentialDelay = Math.min(STREAM_OVERLOAD_MAX_DELAY_MS, STREAM_OVERLOAD_BASE_DELAY_MS * (2 ** attempt));
-  const jitter = 0.8 + Math.random() * 0.4;
-  return Math.round(exponentialDelay * jitter);
+function getOverloadRetryDelayMs(serverDelayMs?: number): number {
+  return Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0);
+}
+
+function enforceMinimumServerRetryDelay(
+  response: Response,
+  onTransportMetrics?: StreamResponseTextOptions['onTransportMetrics']
+): Response {
+  if (response.status < 500 || response.status > 599) {
+    return response;
+  }
+
+  const serverDelayMs = parseRetryAfterHeadersMs(response.headers);
+  const retryDelayMs = Math.min(
+    OPENAI_MAX_RETRY_AFTER_MS,
+    Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0)
+  );
+  if (serverDelayMs === retryDelayMs && response.headers.has('retry-after-ms')) {
+    return response;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set('retry-after-ms', String(retryDelayMs));
+  onTransportMetrics?.({ retryReason: 'http_server_overloaded' });
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+function parseRetryAfterHeadersMs(headers: Headers): number | undefined {
+  const retryAfterMsHeader = headers.get('retry-after-ms');
+  if (retryAfterMsHeader !== null) {
+    const retryAfterMs = Number(retryAfterMsHeader);
+    if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+      return retryAfterMs;
+    }
+  }
+
+  const retryAfter = headers.get('retry-after');
+  if (!retryAfter) {
+    return undefined;
+  }
+  const retryAfterSeconds = Number(retryAfter);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+    return retryAfterSeconds * 1_000;
+  }
+  const retryAt = Date.parse(retryAfter);
+  if (!Number.isFinite(retryAt)) {
+    return undefined;
+  }
+  return Math.max(0, retryAt - Date.now());
 }
 
 export async function countInputTokens(options: CountInputTokensOptions): Promise<number> {

@@ -215,10 +215,10 @@
         },
         "codexModelProvider.maxRetries": {
           "type": "number",
-          "default": 5,
+          "default": 15,
           "minimum": 0,
-          "maximum": 10,
-          "description": "Maximum retry count for transient connection, timeout, rate-limit, 5xx, and in-stream server-overload failures before visible output is emitted."
+          "maximum": 15,
+          "description": "Maximum retry count for transient connection, timeout, rate-limit, 5xx, and in-stream server-overload failures before visible output is emitted. Server-overload retries wait at least 10 seconds between attempts."
         },
         "codexModelProvider.websocketPrewarm": {
           "type": "string",
