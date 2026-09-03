@@ -52,6 +52,7 @@ const CACHE_CONTROL_DATA_PART_MIME = 'cache_control';
 const MAX_STATEFUL_MARKER_BYTES = 4096;
 const MAX_STATEFUL_MARKER_MODEL_ID_BYTES = 512;
 const MAX_STATEFUL_MARKER_RESPONSE_ID_BYTES = 512;
+export const MAX_RESPONSES_FUNCTION_NAME_LENGTH = 128;
 const RUNTIME_SYSTEM_MESSAGE_ROLE = 3;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_DATA_URL_PATTERN = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i;
@@ -390,7 +391,13 @@ function normalizeDanglingFunctionCallsForReplay(input: ResponsesInputMessage[])
 function isReplayableFunctionCall(item: ResponsesInputMessage): boolean {
   return item.type === 'function_call'
     && firstNonEmptyString(item.call_id).length > 0
-    && firstNonEmptyString(item.name).length > 0;
+    && isValidResponsesFunctionName(item.name);
+}
+
+export function isValidResponsesFunctionName(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && value.length <= MAX_RESPONSES_FUNCTION_NAME_LENGTH;
 }
 
 function firstNonEmptyString(...values: unknown[]): string {

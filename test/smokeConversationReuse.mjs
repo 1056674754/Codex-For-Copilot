@@ -110,7 +110,12 @@ const {
   stableSerialize
 } = require(compareBundlePath);
 const { ResponseBranchStore } = require(branchStoreBundlePath);
-const { buildResponseBranchReuseEnvelope, buildResponseBranchToolSignatures, getReasoningEffort } = require(providerBundlePath);
+const {
+  buildResponseBranchReuseEnvelope,
+  buildResponseBranchToolSignatures,
+  getReasoningEffort,
+  hasCanonicalReplayContinuationIntegrity
+} = require(providerBundlePath);
 
 try {
   runStableSerializeSmokeTest(stableSerialize);
@@ -128,6 +133,10 @@ try {
   runCacheControlToolResultSmokeTest(convertMessagesToResponsesInput, ResponseBranchStore);
   runDanglingToolCallSteerSmokeTest(convertMessagesToResponsesInput);
   runNamelessToolCallReplaySmokeTest(convertMessagesToResponsesInput);
+  runOversizedToolCallNameReplaySmokeTest(
+    convertMessagesToResponsesInput,
+    hasCanonicalReplayContinuationIntegrity
+  );
   runImageToolResultSmokeTest(convertMessagesToResponsesInput);
   runImagePlaceholderReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
   runImageUriAnnotationReuseSmokeTest(compareResponsesInputHistory, convertMessagesToResponsesInput, ResponseBranchStore);
@@ -840,6 +849,63 @@ function runNamelessToolCallReplaySmokeTest(convertMessagesToResponsesInput) {
       type: 'message'
     }
   ]), 'nameless tool calls and their outputs are not replayed as invalid protocol items');
+}
+
+function runOversizedToolCallNameReplaySmokeTest(
+  convertMessagesToResponsesInput,
+  hasCanonicalReplayContinuationIntegrity
+) {
+  const oversizedName = 'x'.repeat(556);
+  const corruptedMessages = [
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.Assistant,
+      content: [new vscodeStub.LanguageModelToolCallPart('call_oversized_name', oversizedName, { number: 10 })]
+    },
+    {
+      role: vscodeStub.LanguageModelChatMessageRole.User,
+      content: [
+        new vscodeStub.LanguageModelToolResultPart('call_oversized_name', [
+          new vscodeStub.LanguageModelTextPart('Corrupted tool result.')
+        ]),
+        new vscodeStub.LanguageModelToolResultPart('call_standalone', [
+          new vscodeStub.LanguageModelTextPart('Valid standalone tool result.')
+        ]),
+        new vscodeStub.LanguageModelTextPart('Continue from the available conversation context.')
+      ]
+    }
+  ];
+
+  const converted = convertMessagesToResponsesInput(corruptedMessages);
+  assertEqual(JSON.stringify(converted), JSON.stringify([
+    {
+      type: 'function_call_output',
+      call_id: 'call_standalone',
+      output: 'Valid standalone tool result.'
+    },
+    {
+      role: 'user',
+      content: 'Continue from the available conversation context.',
+      type: 'message'
+    }
+  ]), 'oversized tool calls and their matched outputs are omitted while standalone outputs survive');
+  assertEqual(
+    hasCanonicalReplayContinuationIntegrity([
+      {
+        type: 'function_call',
+        call_id: 'call_oversized_name',
+        name: oversizedName,
+        arguments: '{}'
+      }
+    ], [
+      {
+        type: 'function_call_output',
+        call_id: 'call_oversized_name',
+        output: 'Corrupted tool result.'
+      }
+    ]),
+    false,
+    'oversized response function names invalidate canonical continuation replay'
+  );
 }
 
 function runImageToolResultSmokeTest(convertMessagesToResponsesInput) {

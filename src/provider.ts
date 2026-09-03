@@ -8,6 +8,7 @@ import {
   convertMessagesToResponsesInput,
   convertMessagesToResponsesInputWithStatefulMarker,
   estimateTokenCount,
+  isValidResponsesFunctionName,
   STATEFUL_MARKER_DATA_PART_MIME,
   stableSerialize,
   type ResponsesInputMessage
@@ -2380,8 +2381,7 @@ export function hasCanonicalReplayContinuationIntegrity(
     const record = item as Record<string, unknown>;
     const callId = typeof record.call_id === 'string' ? record.call_id.trim() : '';
     if (record.type === 'function_call') {
-      const name = typeof record.name === 'string' ? record.name.trim() : '';
-      if (!callId || !name || functionCallIds.has(callId)) {
+      if (!callId || !isValidResponsesFunctionName(record.name) || functionCallIds.has(callId)) {
         return false;
       }
       functionCallIds.add(callId);
@@ -2644,13 +2644,12 @@ function normalizeLocalReplayItem(
   if (record.type === 'function_call') {
     return typeof record.call_id === 'string'
       && record.call_id.trim().length > 0
-      && typeof record.name === 'string'
-      && record.name.trim().length > 0
+      && isValidResponsesFunctionName(record.name)
       && typeof record.arguments === 'string'
       ? {
           type: 'function_call',
           call_id: record.call_id,
-          name: record.name,
+          name: record.name.trim(),
           arguments: record.arguments
         }
       : INVALID_LOCAL_REPLAY_ITEM;
