@@ -165,7 +165,7 @@ try {
   assertEqual(rawImportedSecrets.has('codexForCopilot.codexAuthBundle'), false, 'legacy single-key record is removed after migration');
   assertEqual(JSON.parse(rawImportedSecrets.get(`codexForCopilot.codexAuthAccount.${migratedKey}`)).source, 'importedAuthJson', 'pre-schema auth.json migration persists a stable schema-v2 record');
 
-  for (const failingKey of ['codexForCopilot.codexAuthAccount.acct_1', 'codexForCopilot.codexAuthAccounts']) {
+  for (const failingKey of ['codexForCopilot.codexAuthAccount.user_example.com--acct_1', 'codexForCopilot.codexAuthAccounts']) {
     const migrationSecrets = new Map([
       ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens })]
     ]);
@@ -257,6 +257,49 @@ try {
   assertEqual(url.searchParams.get('scope'), 'openid profile email offline_access api.connectors.read api.connectors.invoke', 'authorization URL matches Codex OAuth scopes');
   assertEqual(url.searchParams.get('code_challenge_method'), 'S256', 'authorization URL uses PKCE S256');
   assertEqual(url.searchParams.get('state'), pkce.state, 'authorization URL includes state');
+  const addAccountUrl = new URL(oauth.createAuthorizationUrl(
+    'http://localhost:1455/auth/callback',
+    pkce.verifier,
+    pkce.challenge,
+    pkce.state,
+    { forceAccountSelection: true }
+  ));
+  assertEqual(addAccountUrl.searchParams.get('prompt'), 'select_account', 'adding an account forces the OAuth account chooser');
+
+  const sharedWorkspaceSecrets = new Map();
+  const sharedWorkspaceStore = new auth.CodexSecretStore({
+    async get(key) { return sharedWorkspaceSecrets.get(key); },
+    async store(key, value) { sharedWorkspaceSecrets.set(key, value); },
+    async delete(key) { sharedWorkspaceSecrets.delete(key); }
+  });
+  const firstSharedWorkspaceKey = await sharedWorkspaceStore.setCredential({
+    schemaVersion: 2,
+    source: 'extensionOAuth',
+    revision: 'shared-first',
+    tokens: {
+      id_token: jwt({ sub: 'user-one', email: 'one@example.com' }),
+      access_token: futureToken,
+      refresh_token: 'shared-first-refresh',
+      account_id: 'shared-workspace'
+    },
+    email: 'one@example.com',
+    lastRefreshAt: new Date().toISOString()
+  });
+  const secondSharedWorkspaceKey = await sharedWorkspaceStore.setCredential({
+    schemaVersion: 2,
+    source: 'extensionOAuth',
+    revision: 'shared-second',
+    tokens: {
+      id_token: jwt({ sub: 'user-two', email: 'two@example.com' }),
+      access_token: futureToken,
+      refresh_token: 'shared-second-refresh',
+      account_id: 'shared-workspace'
+    },
+    email: 'two@example.com',
+    lastRefreshAt: new Date().toISOString()
+  });
+  assertEqual(firstSharedWorkspaceKey === secondSharedWorkspaceKey, false, 'different users in one ChatGPT workspace get distinct account keys');
+  assertEqual((await sharedWorkspaceStore.listAccountKeys()).length, 2, 'shared-workspace users are both retained');
 
   const callbackPort = await findAvailablePort();
   const loopbackClient = {
@@ -309,6 +352,7 @@ try {
 
   const authChanges = new EventEmitter();
   let signedInSnapshot;
+  let signInOptions;
   const fakeAuthManager = {
     onDidChangeAuth: authChanges.event,
     async getStatus() {
@@ -328,7 +372,8 @@ try {
       }
       return signedInSnapshot;
     },
-    async signInWithBrowser() {
+    async signInWithBrowser(options) {
+      signInOptions = options;
       signedInSnapshot = {
         source: 'extensionOAuth',
         accessToken: 'initial-access-token',
@@ -337,6 +382,7 @@ try {
         refreshable: true
       };
       authChanges.fire({ reason: 'signedIn' });
+      return 'acct_1';
     },
     async signOut() {
       signedInSnapshot = undefined;
@@ -349,6 +395,7 @@ try {
   assertEqual((await authenticationProvider.getSessions(undefined, {})).length, 0, 'unauthenticated provider has no sessions');
   const session = await authenticationProvider.createSession(['openid'], {});
   await flushEvents();
+  assertEqual(signInOptions?.forceAccountSelection, true, 'VS Code session creation requests a distinct account chooser');
   assertEqual(session.account.id, 'acct_1', 'session uses Codex account ID');
   assertEqual(sessionChanges[0].added[0].id, session.id, 'sign-in adds a VS Code session');
   signedInSnapshot = { ...signedInSnapshot, accessToken: 'refreshed-access-token', revision: 'second' };
@@ -360,6 +407,34 @@ try {
   assertEqual(sessionChanges[2].removed[0].id, session.id, 'sign-out removes the VS Code session');
   await assertRejects(() => authenticationProvider.createSession(['unsupported-scope'], {}), 'unsupported authentication scope rejected');
   authenticationProvider.dispose();
+
+  const multiAccountProvider = new auth.CodexAuthenticationProvider({
+    onDidChangeAuth: new EventEmitter().event,
+    async listAccounts() {
+      return [
+        { accountKey: 'acct_one', source: 'extensionOAuth', email: 'one@example.com', accountId: 'workspace', isActive: true, reauthRequired: false },
+        { accountKey: 'acct_two', source: 'extensionOAuth', email: 'two@example.com', accountId: 'workspace', isActive: false, reauthRequired: false }
+      ];
+    },
+    async getCredentialSnapshot(accountKey) {
+      return {
+        source: 'extensionOAuth',
+        accessToken: `token-${accountKey}`,
+        accountId: 'workspace',
+        accountKey,
+        revision: `revision-${accountKey}`,
+        refreshable: true
+      };
+    }
+  });
+  const allSessions = await multiAccountProvider.getSessions(undefined, {});
+  const filteredSessions = await multiAccountProvider.getSessions(undefined, {
+    account: allSessions[1].account
+  });
+  assertEqual(allSessions.length, 2, 'authentication provider exposes every stored account');
+  assertEqual(filteredSessions.length, 1, 'authentication provider honors VS Code account filtering');
+  assertEqual(filteredSessions[0].account.id, 'acct_two', 'authentication provider returns the requested account');
+  multiAccountProvider.dispose();
 
   console.log('Smoke test passed: auth import, PKCE, loopback completion, JWT parsing, refresh decisions, 401 retry, and VS Code authentication sessions are correct.');
 } finally {

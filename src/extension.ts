@@ -228,7 +228,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       try {
         let accountKey: string | undefined;
         if (method.id === 'browser') {
-          accountKey = await authManager.signInWithBrowser();
+          accountKey = await authManager.signInWithBrowser({ forceAccountSelection: true });
         } else if (method.id === 'device') {
           accountKey = await authManager.signInWithDeviceCode();
         } else {

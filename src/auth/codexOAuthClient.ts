@@ -5,11 +5,24 @@ export interface OAuthTokens { id_token: string; access_token: string; refresh_t
 export interface DeviceCodeResponse { device_auth_id: string; user_code: string; verification_uri: string; interval: number; }
 type FetchLike = typeof fetch;
 
+export interface CodexAuthorizationOptions {
+  forceAccountSelection?: boolean;
+}
+
 export class CodexOAuthClient {
   constructor(private readonly request: FetchLike = fetch, private readonly profile: CodexOAuthCompatibilityProfile = CODEX_OAUTH) {}
-  createAuthorizationUrl(redirectUri: string, verifier: string, challenge: string, state: string): string {
+  createAuthorizationUrl(
+    redirectUri: string,
+    verifier: string,
+    challenge: string,
+    state: string,
+    options: CodexAuthorizationOptions = {}
+  ): string {
     const url = new URL(this.profile.authorizeUrl);
     url.search = new URLSearchParams({ response_type: 'code', client_id: this.profile.clientId, redirect_uri: redirectUri, scope: this.profile.scopes, code_challenge: challenge, code_challenge_method: 'S256', state, id_token_add_organizations: 'true', codex_cli_simplified_flow: 'true', originator: 'codex-for-copilot' }).toString();
+    if (options.forceAccountSelection) {
+      url.searchParams.set('prompt', 'select_account');
+    }
     return url.toString();
   }
   async exchangeAuthorizationCode(code: string, redirectUri: string, verifier: string): Promise<OAuthTokens> {

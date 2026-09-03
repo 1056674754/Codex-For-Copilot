@@ -21,22 +21,24 @@ export class CodexAuthenticationProvider implements vscode.AuthenticationProvide
     });
   }
 
-  async getSessions(scopes: readonly string[] | undefined, _options: vscode.AuthenticationProviderSessionOptions): Promise<vscode.AuthenticationSession[]> {
+  async getSessions(scopes: readonly string[] | undefined, options: vscode.AuthenticationProviderSessionOptions): Promise<vscode.AuthenticationSession[]> {
     if (scopes && !supportsRequestedScopes(scopes)) {
       return [];
     }
     const sessions = await this.getAllSessions();
     this.knownSessions = new Map(sessions.map((session) => [session.id, session]));
-    return sessions;
+    return options.account
+      ? sessions.filter((session) => session.account.id === options.account?.id)
+      : sessions;
   }
 
   async createSession(scopes: readonly string[], _options: vscode.AuthenticationProviderSessionOptions): Promise<vscode.AuthenticationSession> {
     if (!supportsRequestedScopes(scopes)) {
       throw new Error('Codex for Copilot does not support the requested authentication scopes.');
     }
-    await this.authManager.signInWithBrowser();
+    const accountKey = await this.authManager.signInWithBrowser({ forceAccountSelection: true });
     const sessions = await this.getAllSessions();
-    const session = sessions.find((candidate) => !this.knownSessions.has(candidate.id)) ?? sessions.at(-1);
+    const session = sessions.find((candidate) => candidate.account.id === accountKey);
     if (!session) {
       throw new Error('ChatGPT sign-in completed without creating a credential session.');
     }

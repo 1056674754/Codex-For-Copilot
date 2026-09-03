@@ -4,7 +4,7 @@ import { CodexAuthLock } from './codexAuthLock';
 import { getJwtExpiration, isJwtExpiringSoon, decodeJwtPayload } from './codexJwt';
 import { CodexSecretStore, randomRevision } from './codexSecretStore';
 import { ACCESS_TOKEN_REFRESH_WINDOW_MS, PERIODIC_REFRESH_INTERVAL_MS } from './codexTokenRefresh';
-import { CodexOAuthClient, type OAuthTokens } from './codexOAuthClient';
+import { CodexOAuthClient, type CodexAuthorizationOptions, type OAuthTokens } from './codexOAuthClient';
 import { signInWithLoopback } from './codexLoopbackLogin';
 import { signInWithDeviceCode } from './codexDeviceCodeLogin';
 import { AuthRequiredError, type CodexAuthChangeEvent, type CodexAuthStatus, type CodexCredentialRecord, type CodexCredentialSnapshot, type CodexCredentialSource, type ExtensionOAuthCredentialRecord, type RefreshableCodexCredentialRecord, ReauthRequiredError, TokenRefreshError } from './codexAuthTypes';
@@ -94,7 +94,7 @@ export class CodexAuthManager implements vscode.Disposable {
     return accountKey;
   }
 
-  async signInWithBrowser(): Promise<string> {
+  async signInWithBrowser(options: CodexAuthorizationOptions = {}): Promise<string> {
     const logger = this.logger?.operation('auth.browser-sign-in');
     logger?.info('sign-in.started');
     let accountKey: string | undefined;
@@ -106,7 +106,8 @@ export class CodexAuthManager implements vscode.Disposable {
       async (tokens) => {
         accountKey = await this.completeSignIn(tokens);
         logger?.info('sign-in.completed');
-      }
+      },
+      options
     );
     return accountKey!;
   }

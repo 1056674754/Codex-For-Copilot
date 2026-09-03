@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { CODEX_OAUTH, type CodexOAuthCompatibilityProfile } from './codexOAuthCompatibility';
 import { generateCodexPkce, statesMatch } from './codexPkce';
-import type { CodexOAuthClient, OAuthTokens } from './codexOAuthClient';
+import type { CodexAuthorizationOptions, CodexOAuthClient, OAuthTokens } from './codexOAuthClient';
 
 export type LoopbackSignInStage = 'listening' | 'browserOpened' | 'callbackReceived' | 'exchangingCode' | 'completed';
 
@@ -10,7 +10,8 @@ export async function signInWithLoopback(
   openExternal: (uri: string) => Thenable<boolean>,
   profile: CodexOAuthCompatibilityProfile = CODEX_OAUTH,
   onStage?: (stage: LoopbackSignInStage, port: number) => void,
-  persistTokens?: (tokens: OAuthTokens) => Promise<void>
+  persistTokens?: (tokens: OAuthTokens) => Promise<void>,
+  authorizationOptions?: CodexAuthorizationOptions
 ): Promise<OAuthTokens> {
   const { server, port } = await bindLoopback(profile.loopbackPorts);
   onStage?.('listening', port);
@@ -31,7 +32,13 @@ export async function signInWithLoopback(
     });
   });
   try {
-    const opened = await openExternal(client.createAuthorizationUrl(redirectUri, pkce.verifier, pkce.challenge, pkce.state));
+    const opened = await openExternal(client.createAuthorizationUrl(
+      redirectUri,
+      pkce.verifier,
+      pkce.challenge,
+      pkce.state,
+      authorizationOptions
+    ));
     if (!opened) throw new Error('VS Code could not open the ChatGPT sign-in page.');
     onStage?.('browserOpened', port);
     const { code, response } = await result;
