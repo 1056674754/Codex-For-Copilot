@@ -52,6 +52,7 @@ try {
   await runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText);
   await runHttpStatusOverloadRetrySmokeTest(streamResponseText);
   await runHttpStreamOverloadRetrySmokeTest(streamResponseText);
+  await runHttpGenericServerFailureRetrySmokeTest(streamResponseText);
   await runHttpStreamOverloadAfterOutputSmokeTest(streamResponseText);
   await runHttpContinuationMissSmokeTest(streamResponseText, isResponsesContinuationMissError);
   await runHttpUnsupportedContinuationSmokeTest(streamResponseText, isResponsesContinuationMissError);
@@ -293,6 +294,53 @@ async function runHttpStreamOverloadRetrySmokeTest(streamResponseText) {
     assertEqual(JSON.stringify(retryReasons), JSON.stringify(['stream_server_overloaded']), 'HTTP overload retry reason');
     assertEqual(JSON.stringify(retryDelays), JSON.stringify([10_000]), 'HTTP in-stream overload waits at least 10 seconds');
     assertEqual(failures.length, 0, 'recovered HTTP overload is not reported as terminal');
+  } finally {
+    server.close();
+  }
+}
+
+async function runHttpGenericServerFailureRetrySmokeTest(streamResponseText) {
+  let requestCount = 0;
+  const retryReasons = [];
+  const failures = [];
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    if (requestCount <= 15) {
+      writeSseFailedResponse(
+        response,
+        undefined,
+        'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_test in your message.'
+      );
+      return;
+    }
+    writeSseResponse(response, ['recovered']);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const retryDelays = await withImmediateLongRetryTimers(async () => {
+      const address = server.address();
+      const deltas = [];
+      await streamResponseText({
+        ...createStreamOptions(`http://127.0.0.1:${address.port}/backend-api/codex/responses`, 'http'),
+        onTextDelta: (text) => deltas.push(text),
+        onResponseFailed: (message) => failures.push(message),
+        onTransportMetrics: (metrics) => {
+          if (metrics.retryReason) retryReasons.push(metrics.retryReason);
+        }
+      });
+      assertEqual(deltas.join(''), 'recovered', 'generic server failure retry returns the recovered response');
+    });
+
+    assertEqual(requestCount, 16, 'generic server failure uses the default 15-retry budget');
+    assertEqual(retryDelays.length, 15, 'generic server failure waits before all 15 retries');
+    assertEqual(retryDelays.every((delay) => delay >= 10_000), true, 'generic server failure waits at least 10 seconds per retry');
+    assertEqual(
+      retryReasons.filter((reason) => reason === 'stream_server_overloaded').length,
+      15,
+      'generic server failure reports each protected retry'
+    );
+    assertEqual(failures.length, 0, 'recovered generic server failure is not reported as terminal');
   } finally {
     server.close();
   }

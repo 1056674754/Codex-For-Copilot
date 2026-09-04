@@ -1509,7 +1509,9 @@ function isResponsesOverloadPayload(error: unknown): boolean {
   let matched = false;
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
-      matched = /\b(?:servers? (?:are )?currently overloaded|server overloaded|service unavailable|temporarily unavailable)\b/i.test(value);
+      matched = /\b(?:servers? (?:are )?currently overloaded|server overloaded|service unavailable|temporarily unavailable)\b/i.test(value)
+        || (/\b(?:an error occurred|something went wrong) while processing your request\b/i.test(value)
+          && /\byou can retry your request\b/i.test(value));
       return !matched;
     }
     if (typeof value !== 'object' || value === null) {
