@@ -38,6 +38,7 @@ import { getApiCredentials } from './secrets';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexIdentityManager, inputStartsNewTurn } from './codexIdentity';
 import { getCodexCompatibilityProfile, type CodexRequestIdentity } from './codexProtocol';
+import { resolveRequestIdentity } from './codexRequestIdentity';
 import { resetCodexFetchCapabilities } from './codexFetchAdapter';
 import {
   buildCodexResponsesRequest,
@@ -424,6 +425,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         })
       });
     }
+    const clientIdentity = resolveRequestIdentity({
+      ...config.requestIdentity,
+      extensionVersion: getExtensionVersion(this.context),
+      extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+    });
     let requestOptions: CodexRequestEnvelopeOptions = {
       compatibilityEnabled: compatibilityProfile.enabled,
       model: selectedModel.requestModel,
@@ -439,7 +445,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       maxOutputTokens: config.maxOutputTokens,
       textVerbosity: 'medium',
       includeEncryptedReasoning: true,
-      protocolSettings: config.protocol
+      protocolSettings: config.protocol,
+      clientIdentity
     };
     const toolSchemas = toolPlan;
     latency.recordContext({
@@ -890,6 +897,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         apiKey: credentials.apiKey,
         headers: credentials.headers,
         authManager: credentials.authManager,
+        accountKey: credentials.accountKey,
         transport: config.transport,
         maxRetries: config.maxRetries,
         compatibilityProfile,
@@ -899,6 +907,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         extensionVersion: getExtensionVersion(this.context),
         userAgent: buildCodexUserAgent(getExtensionVersion(this.context)),
         protocolSettings: config.protocol,
+        clientIdentity,
         turnStartedAtUnixMs: branchState.turn.startedAt,
         websocketPrewarm: config.websocketPrewarm,
         requestCompression: config.requestCompression,
@@ -917,6 +926,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         reasoning: requestOptions.reasoning,
         maxOutputTokens: requestOptions.maxOutputTokens,
         token,
+        hasProviderVisibleOutput: () => reportedVisibleOutput,
         onTextDelta: (text) => {
           pendingResponseText += text;
           if (text) {
@@ -1063,7 +1073,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         },
         onTransportMetrics: (metrics) => {
           if (metrics.retryReason === 'websocket_unauthorized_recovered'
-            || metrics.retryReason === 'websocket_connection_limit_reached') {
+            || metrics.retryReason === 'websocket_connection_limit_reached'
+            || metrics.retryReason === 'websocket_prewarm_continuation_miss'
+            || metrics.retryReason === 'stream_rate_limit_exceeded') {
             resetAttemptState();
           }
           previousResponseIdUsed ||= metrics.previousResponseIdUsed === true;
@@ -1505,6 +1517,11 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
     this.handleConnectionConfiguration(config, authIdentity);
     const compatibilityProfile = getCodexCompatibilityProfile(config.baseURL, credentials, config.protocol.profile);
+    const clientIdentity = resolveRequestIdentity({
+      ...config.requestIdentity,
+      extensionVersion: getExtensionVersion(this.context),
+      extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+    });
     const started = compatibilityProfile.enabled && preconnectCodexResponsesWebSocket({
       baseURL: config.baseURL,
       apiKey: credentials.apiKey,
@@ -1513,7 +1530,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       authIdentity,
       extensionVersion: getExtensionVersion(this.context),
       userAgent: buildCodexUserAgent(getExtensionVersion(this.context)),
-      protocolSettings: config.protocol
+      protocolSettings: config.protocol,
+      clientIdentity
     });
     if (started) {
       this.outputChannel.debug('response WebSocket preconnection started', {
@@ -1565,6 +1583,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         apiKey: credentials.apiKey,
         headers: credentials.headers,
         authManager: credentials.authManager,
+        accountKey: credentials.accountKey,
         model: selectedModel.requestModel,
         input,
         token
@@ -1700,7 +1719,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     authIdentity: string
   ): Promise<ProviderModelCatalog> {
     const logger = this.logger.operation('model-discovery.fetch');
-    const upstreamModels = await fetchAvailableModels(config, credentials, token);
+    const clientIdentity = resolveRequestIdentity({
+      ...config.requestIdentity,
+      extensionVersion: getExtensionVersion(this.context),
+      extensionUserAgent: buildCodexUserAgent(getExtensionVersion(this.context))
+    });
+    const upstreamModels = await fetchAvailableModels(config, credentials, token, clientIdentity);
     const models = this.applyModelDiscoveryPolicy(buildProviderModels(config, upstreamModels, credentials.kind), config, authIdentity);
     logger.debug('getAvailableModels discovery success', {
       discoveredCount: upstreamModels.length,

@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot (Song Patched)",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "publisher": "song-local",
   "license": "MIT",
   "repository": {
@@ -33,7 +33,7 @@
     "test:real-backend": "node test/realBackendProbe.mjs",
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
     "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
-    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeHostedWebSearch.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolOptIn.mjs && node test/smokeNativeToolGroupingBridge.mjs && node test/smokeNativeToolSearchStatus.mjs",
+    "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeHostedWebSearch.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexWebSocketListenerOrdering.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolOptIn.mjs && node test/smokeNativeToolGroupingBridge.mjs && node test/smokeNativeToolSearchStatus.mjs",
     "test:smoke": "npm run test:codex-parity && node test/smokeCodexLogger.mjs && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
@@ -319,6 +319,51 @@
           "tags": [
             "advanced"
           ]
+        },
+        "codexModelProvider.requestIdentityProfile": {
+          "type": "string",
+          "default": "extension",
+          "enum": [
+            "extension",
+            "codexCliCompatible",
+            "neutral",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Identify requests as Codex For Copilot.",
+            "Use a client identity compatible with the pinned Codex CLI protocol baseline.",
+            "Do not add Codex For Copilot branding while preserving required Codex protocol fields.",
+            "Use the configured custom client identity."
+          ],
+          "description": "Controls the client-declared identity independently of Codex protocol compatibility."
+        },
+        "codexModelProvider.customRequestIdentity": {
+          "type": "object",
+          "default": {},
+          "properties": {
+            "originator": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "userAgent": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "version": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "agentName": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "source": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "additionalProperties": false,
+          "description": "Validated client identity fields used only by the custom request identity profile."
         },
         "codexModelProvider.headerOverrides": {
           "type": "object",

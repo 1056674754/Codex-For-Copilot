@@ -25,6 +25,7 @@ import {
   buildCodexWebSocketPreconnectHeaders,
   buildCodexRequestHeaders,
   buildCodexProtocolSnapshot,
+  applyClientIdentityHeaders,
   type CodexCompatibilityProfile,
   type CodexProtocolSettings,
   type CodexRequestIdentity
@@ -42,6 +43,7 @@ import {
   type CodexConnectionScopeBase
 } from './codexConnectionManager';
 import type { CodexWebSocketHandshake, CodexWebSocketPreconnectionObserver } from './codexWebSocketSession';
+import { resolveRequestIdentity, type ResolvedRequestIdentity } from './codexRequestIdentity';
 import type { CodexFunctionCallEvent, CodexToolPlan } from './nativeToolSearch/nativeToolTypes';
 import {
   extractWebSearchSources,
@@ -60,8 +62,11 @@ const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
 const PREVIOUS_RESPONSE_ID_PARAM = 'previous_response_id';
-const INVALID_PREVIOUS_RESPONSE_ID_MESSAGE = 'Invalid previous_response_id';
 const UNSUPPORTED_PREVIOUS_RESPONSE_ID_MESSAGE = 'Unsupported parameter: previous_response_id';
+const INVALID_PREVIOUS_RESPONSE_ID_MESSAGES = new Set([
+  'Invalid previous_response_id.',
+  'Invalid `previous_response_id`.'
+]);
 const CONTINUATION_MISS_MESSAGE = 'Responses API could not find previous_response_id.';
 const MAX_ERROR_TRAVERSAL_NODES = 64;
 const MAX_ERROR_TRAVERSAL_DEPTH = 8;
@@ -112,6 +117,7 @@ export interface CountInputTokensOptions {
   apiKey: string;
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
+  accountKey?: string;
   model: string;
   input: string | ResponsesInputMessage[];
   token: vscode.CancellationToken;
@@ -122,8 +128,8 @@ export interface StreamResponseTextOptions {
   apiKey: string;
   headers?: Record<string, string>;
   authManager?: CodexAuthManager;
+  accountKey?: string;
   transport?: 'auto' | 'http' | 'websocket';
-  maxRetries?: number;
   compatibilityProfile?: CodexCompatibilityProfile;
   identity?: CodexRequestIdentity;
   turnState?: string;
@@ -131,6 +137,7 @@ export interface StreamResponseTextOptions {
   extensionVersion?: string;
   userAgent?: string;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
   turnStartedAtUnixMs?: number;
   websocketPrewarm?: 'auto' | 'enabled' | 'disabled';
   requestCompression?: RequestCompressionPolicy;
@@ -172,6 +179,8 @@ export interface StreamResponseTextOptions {
     usage?: ResponseUsage | null;
   }) => void;
   onResponseFailed?: (message: string) => void;
+  hasProviderVisibleOutput?: () => boolean;
+  maxRetries?: number;
   onTransportFallback?: (event: {
     from: 'websocket';
     to: 'http';
@@ -192,6 +201,7 @@ export interface PreconnectCodexResponsesWebSocketOptions {
   extensionVersion?: string;
   userAgent?: string;
   protocolSettings?: CodexProtocolSettings;
+  clientIdentity?: ResolvedRequestIdentity;
   onConnected?: CodexWebSocketPreconnectionObserver['onConnected'];
   onError?: CodexWebSocketPreconnectionObserver['onError'];
 }
@@ -205,7 +215,7 @@ export function isResponsesContinuationMissPayload(error: unknown): boolean {
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
       const normalized = value.trim().replaceAll('`', '').replace(/\.$/, '');
-      matched = normalized === INVALID_PREVIOUS_RESPONSE_ID_MESSAGE
+      matched = INVALID_PREVIOUS_RESPONSE_ID_MESSAGES.has(value.trim())
         || normalized === UNSUPPORTED_PREVIOUS_RESPONSE_ID_MESSAGE;
       return !matched;
     }
@@ -243,8 +253,7 @@ export function preconnectCodexResponsesWebSocket(options: PreconnectCodexRespon
 
   const headers = buildCodexWebSocketPreconnectHeaders({
     credentialsHeaders: options.headers,
-    extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`,
+    clientIdentity: resolveClientIdentity(options),
     settings: options.protocolSettings
   });
 
@@ -300,24 +309,31 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         await streamResponseTextOnce(trackedOptions, abortController);
         return;
       } catch (error) {
-        if (error instanceof ResponsesStreamRateLimitError
-          && attempt < STREAM_RATE_LIMIT_MAX_RETRIES
-          && !visibleActivity) {
-          options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
-          await waitForRetryDelay(error.retryDelayMs, abortController.signal);
-          continue;
-        }
-        if (error instanceof ResponsesStreamOverloadError
-          && attempt < (options.maxRetries ?? OPENAI_DEFAULT_MAX_RETRIES)
-          && !visibleActivity) {
+        if (!(error instanceof ResponsesStreamRateLimitError)
+          || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
+          || visibleActivity
+          || options.hasProviderVisibleOutput?.() === true) {
+          if (!(error instanceof ResponsesStreamOverloadError)
+            || attempt >= (options.maxRetries ?? OPENAI_DEFAULT_MAX_RETRIES)
+            || visibleActivity
+            || options.hasProviderVisibleOutput?.() === true) {
+            throw error;
+          }
           options.onTransportMetrics?.({ retryReason: 'stream_server_overloaded' });
           await waitForRetryDelay(
             getOverloadRetryDelayMs(error.retryDelayMs),
             abortController.signal
           );
+          if (options.token.isCancellationRequested || abortController.signal.aborted) {
+            return;
+          }
           continue;
         }
-        throw error;
+        options.onTransportMetrics?.({ retryReason: 'stream_rate_limit_exceeded' });
+        await waitForRetryDelay(error.retryDelayMs, abortController.signal);
+        if (options.token.isCancellationRequested || abortController.signal.aborted) {
+          return;
+        }
       }
     }
   } catch (error) {
@@ -437,6 +453,7 @@ async function streamResponseTextOverHttp(
     modelsEtagPresent: Boolean(response.headers.get('x-models-etag'))
   });
   const handleEvent = createResponsesServerEventHandler(options);
+  let sawTerminalEvent = false;
 
   for await (const event of stream) {
     if (options.token.isCancellationRequested) {
@@ -444,7 +461,17 @@ async function streamResponseTextOverHttp(
       return;
     }
 
+    if (event.type === 'response.completed'
+      || event.type === 'response.failed'
+      || event.type === 'response.incomplete'
+      || event.type === 'error') {
+      sawTerminalEvent = true;
+    }
     handleEvent(event);
+  }
+
+  if (!sawTerminalEvent && !options.token.isCancellationRequested && !abortController.signal.aborted) {
+    throw new Error('Responses HTTP stream ended before a terminal event.');
   }
 }
 
@@ -594,7 +621,6 @@ async function streamCodexResponseTextOverManagedWebSocket(
   const { request, metrics } = buildResponsesCreateRequest(options);
   options.onTransportMetrics?.({ ...metrics });
   const builderOptions = createRequestBuilderOptions(options);
-  const handleEvent = createResponsesServerEventHandler(options);
 
   const prewarmMode = options.websocketPrewarm ?? 'auto';
   if (!managed.reused && prewarmMode === 'auto') {
@@ -656,6 +682,8 @@ async function streamCodexResponseTextOverManagedWebSocket(
 
   let visibleActivity = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    let previousResponseIdUsed: string | undefined;
+    const handleEvent = createResponsesServerEventHandler(options);
     try {
       const result = await managed.session.stream({
         request,
@@ -663,7 +691,10 @@ async function streamCodexResponseTextOverManagedWebSocket(
         identity,
         allowToolOutputContinuation: options.allowToolOutputContinuation === true,
         signal: abortController.signal,
-        onRequestPrepared: (prepared) => reportManagedWebSocketRequestMetrics(options, prepared),
+        onRequestPrepared: (prepared) => {
+          previousResponseIdUsed = prepared.previousResponseIdUsed;
+          reportManagedWebSocketRequestMetrics(options, prepared);
+        },
         onHandshake: (handshake, connectedAt) => {
           options.onWebSocketHandshake?.(handshake);
           options.onTransportMetrics?.({ websocketConnectedAt: connectedAt });
@@ -675,6 +706,13 @@ async function streamCodexResponseTextOverManagedWebSocket(
             || event.type === 'response.function_call_arguments.done'
             || (event.type === 'response.output_item.done' && event.item.type === 'function_call')) {
             visibleActivity = true;
+          }
+          if (isSafePrewarmContinuationMiss(event, options, previousResponseIdUsed, visibleActivity)) {
+            throw new ResponsesContinuationMissError(
+              CONTINUATION_MISS_MESSAGE,
+              previousResponseIdUsed!,
+              { cause: new Error(collectErrorMessages(event)[0] ?? CONTINUATION_MISS_MESSAGE) }
+            );
           }
           handleEvent(event);
         }
@@ -689,11 +727,25 @@ async function streamCodexResponseTextOverManagedWebSocket(
       return;
     } catch (error) {
       codexConnectionManager.closeThread(scope);
-      const classified = classifyManagedWebSocketError(error, options);
+      const classified = classifyManagedWebSocketError(error, options, previousResponseIdUsed);
+      const internalPrewarmContinuationMiss = !options.previousResponseId
+        && Boolean(previousResponseIdUsed)
+        && classified instanceof ResponsesContinuationMissError;
+      if (internalPrewarmContinuationMiss) {
+        codexConnectionManager.disablePrewarm(scope);
+      }
+      if (attempt === 0
+        && !visibleActivity
+        && options.hasProviderVisibleOutput?.() !== true
+        && internalPrewarmContinuationMiss) {
+        managed = codexConnectionManager.getOrCreate(scope, client, createResponsesWsOptions(headers, options.baseURL));
+        options.onTransportMetrics?.({ retryReason: 'websocket_prewarm_continuation_miss' });
+        continue;
+      }
       if (attempt === 0 && !visibleActivity && options.authManager && isUnauthorizedError(error)) {
-        const currentSnapshot = await options.authManager.getCredentialSnapshot();
+        const currentSnapshot = await options.authManager.getCredentialSnapshot(options.accountKey);
         const snapshot = await options.authManager.recoverFromUnauthorized({
-          accountKey: currentSnapshot.accountKey ?? '',
+          accountKey: options.accountKey ?? currentSnapshot.accountKey ?? '',
           snapshotRevision: currentSnapshot.revision,
           visibleActivity: false,
           reason: 'websocketUnauthorized'
@@ -770,9 +822,14 @@ function reportManagedWebSocketResult(
   });
 }
 
-function classifyManagedWebSocketError(error: unknown, options: StreamResponseTextOptions): Error {
-  if (options.previousResponseId && isResponsesContinuationMissPayload(error)) {
-    return new ResponsesContinuationMissError(CONTINUATION_MISS_MESSAGE, options.previousResponseId, {
+function classifyManagedWebSocketError(
+  error: unknown,
+  options: StreamResponseTextOptions,
+  previousResponseIdUsed?: string
+): Error {
+  const continuationResponseId = options.previousResponseId ?? previousResponseIdUsed;
+  if (continuationResponseId && isResponsesContinuationMissPayload(error)) {
+    return new ResponsesContinuationMissError(CONTINUATION_MISS_MESSAGE, continuationResponseId, {
       cause: error instanceof Error ? error : undefined
     });
   }
@@ -793,6 +850,19 @@ function classifyManagedWebSocketError(error: unknown, options: StreamResponseTe
     return error;
   }
   return new Error(String(error));
+}
+
+function isSafePrewarmContinuationMiss(
+  event: ResponsesServerEvent,
+  options: StreamResponseTextOptions,
+  previousResponseIdUsed: string | undefined,
+  visibleActivity: boolean
+): boolean {
+  return !options.previousResponseId
+    && Boolean(previousResponseIdUsed)
+    && !visibleActivity
+    && options.hasProviderVisibleOutput?.() !== true
+    && isResponsesContinuationMissPayload(event);
 }
 
 function createReusableWebSocketSession(options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers'>): ReusableResponsesWebSocketSession {
@@ -907,7 +977,7 @@ function evictReusableWebSocketSessions(): void {
 }
 
 function createOpenAIClient(
-  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics' | 'maxRetries'>,
+  options: Pick<StreamResponseTextOptions, 'apiKey' | 'baseURL' | 'headers' | 'authManager' | 'accountKey' | 'compatibilityProfile' | 'requestCompression' | 'onTransportMetrics' | 'maxRetries'>,
   defaultHeaders?: Record<string, string>
 ): OpenAI {
   const compressedFetch = createCodexFetchAdapter({
@@ -925,7 +995,7 @@ function createOpenAIClient(
     })
   });
   const baseFetch: typeof fetch = options.authManager
-    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch)
+    ? (input, init) => codexFetch(options.authManager!, input, init, compressedFetch, options.accountKey)
     : compressedFetch;
   const customFetch: typeof fetch = async (input, init) => {
     const response = await baseFetch(input, init);
@@ -972,19 +1042,23 @@ function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexR
     textVerbosity: 'medium',
     includeEncryptedReasoning: true,
     protocolSettings: options.protocolSettings,
+    clientIdentity: options.clientIdentity,
     turnStartedAtUnixMs: options.turnStartedAtUnixMs
   };
 }
 
 function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'http' | 'websocket'): Record<string, string> {
   if (!options.compatibilityProfile?.enabled || !options.identity) {
-    return { ...options.headers };
+    const headers = { ...options.headers };
+    applyClientIdentityHeaders(headers, resolveClientIdentity(options));
+    return headers;
   }
   const snapshot = buildCodexProtocolSnapshot({
     identity: options.identity,
     turnStartedAtUnixMs: options.turnStartedAtUnixMs,
     toolPlan: options.toolPlan,
-    settings: options.protocolSettings
+    settings: options.protocolSettings,
+    clientIdentity: options.clientIdentity
   });
   const metadata = snapshot.compatibilityTurnMetadata;
   return buildCodexRequestHeaders({
@@ -993,9 +1067,17 @@ function buildDynamicHeaders(options: StreamResponseTextOptions, transport: 'htt
     turnMetadata: metadata,
     snapshot,
     turnState: options.turnState,
-    extensionVersion: options.extensionVersion ?? '0.0.0',
-    userAgent: options.userAgent ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+    clientIdentity: resolveClientIdentity(options)
   }, transport);
+}
+
+function resolveClientIdentity(options: Pick<StreamResponseTextOptions, 'clientIdentity' | 'extensionVersion' | 'userAgent' | 'headers'>): ResolvedRequestIdentity {
+  return options.clientIdentity ?? resolveRequestIdentity({
+    extensionVersion: options.extensionVersion ?? '0.0.0',
+    extensionUserAgent: options.userAgent
+      ?? getHeader(options.headers, 'User-Agent')
+      ?? `codex-for-copilot/${options.extensionVersion ?? '0.0.0'}`
+  });
 }
 
 function getHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
@@ -1012,6 +1094,7 @@ function createResponsesWsOptions(headers?: Record<string, string>, baseURL?: st
 }
 
 export { shouldBypassProxy } from './proxy';
+export { resolveRequestIdentity };
 
 function getManagedConnectionScope(options: StreamResponseTextOptions): CodexConnectionScope | undefined {
   if (!options.compatibilityProfile?.enabled || !options.identity || !options.authIdentity) {
@@ -1306,6 +1389,22 @@ function handleResponsesServerEvent(
     return;
   }
 
+  if (event.type === 'response.incomplete') {
+    const reason = event.response.incomplete_details?.reason;
+    const message = reason
+      ? `Responses API response incomplete (${reason}).`
+      : 'Responses API response incomplete.';
+    options.onResponseFailed?.(message);
+    throw new Error(message);
+  }
+
+  if (event.type === 'error') {
+    const message = collectErrorMessages(event).find((value) => value.trim())
+      ?? 'Responses API stream error.';
+    options.onResponseFailed?.(message);
+    throw new Error(message);
+  }
+
   if (event.type === 'response.failed') {
     const error = event.response.error;
 
@@ -1506,25 +1605,80 @@ class ResponsesStreamOverloadError extends Error {
 }
 
 function isResponsesOverloadPayload(error: unknown): boolean {
-  let matched = false;
+  let messageMatched = false;
+  let dedicatedCodeMatched = false;
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
-      matched = /\b(?:servers? (?:are )?currently overloaded|server overloaded|service unavailable|temporarily unavailable)\b/i.test(value)
+      messageMatched = /\b(?:servers? (?:are )?currently overloaded|server overloaded|service unavailable|temporarily unavailable)\b/i.test(value)
         || (/\b(?:an error occurred|something went wrong) while processing your request\b/i.test(value)
           && /\byou can retry your request\b/i.test(value));
-      return !matched;
+      return !messageMatched;
     }
     if (typeof value !== 'object' || value === null) {
       return true;
     }
     const code = readOwnErrorProperty(value, 'code');
-    matched = code === 'server_error'
-      || code === 'server_overloaded'
+    dedicatedCodeMatched = code === 'server_overloaded'
       || code === 'overloaded'
       || code === 'temporarily_unavailable';
-    return !matched;
+    return !dedicatedCodeMatched;
   });
-  return matched;
+  return messageMatched || dedicatedCodeMatched;
+}
+
+function getOverloadRetryDelayMs(serverDelayMs?: number): number {
+  return Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0);
+}
+
+function parseRetryAfterHeadersMs(headers: Headers): number | undefined {
+  const retryAfterMsHeader = headers.get('retry-after-ms');
+  if (retryAfterMsHeader !== null) {
+    const retryAfterMs = Number(retryAfterMsHeader);
+    if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+      return retryAfterMs;
+    }
+  }
+
+  const retryAfter = headers.get('retry-after');
+  if (!retryAfter) {
+    return undefined;
+  }
+  const retryAfterSeconds = Number(retryAfter);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+    return retryAfterSeconds * 1_000;
+  }
+  const retryAt = Date.parse(retryAfter);
+  if (!Number.isFinite(retryAt)) {
+    return undefined;
+  }
+  return Math.max(0, retryAt - Date.now());
+}
+
+function enforceMinimumServerRetryDelay(
+  response: Response,
+  onTransportMetrics?: StreamResponseTextOptions['onTransportMetrics']
+): Response {
+  if (response.status < 500 || response.status > 599) {
+    return response;
+  }
+
+  const serverDelayMs = parseRetryAfterHeadersMs(response.headers);
+  const retryDelayMs = Math.min(
+    OPENAI_MAX_RETRY_AFTER_MS,
+    Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0)
+  );
+  if (serverDelayMs === retryDelayMs && response.headers.has('retry-after-ms')) {
+    return response;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set('retry-after-ms', String(retryDelayMs));
+  onTransportMetrics?.({ retryReason: 'http_server_overloaded' });
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 function parseRetryDelayMs(message: string | null | undefined): number | undefined {
@@ -1556,61 +1710,6 @@ async function waitForRetryDelay(delayMs: number | undefined, signal: AbortSigna
   });
 }
 
-function getOverloadRetryDelayMs(serverDelayMs?: number): number {
-  return Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0);
-}
-
-function enforceMinimumServerRetryDelay(
-  response: Response,
-  onTransportMetrics?: StreamResponseTextOptions['onTransportMetrics']
-): Response {
-  if (response.status < 500 || response.status > 599) {
-    return response;
-  }
-
-  const serverDelayMs = parseRetryAfterHeadersMs(response.headers);
-  const retryDelayMs = Math.min(
-    OPENAI_MAX_RETRY_AFTER_MS,
-    Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0)
-  );
-  if (serverDelayMs === retryDelayMs && response.headers.has('retry-after-ms')) {
-    return response;
-  }
-
-  const headers = new Headers(response.headers);
-  headers.set('retry-after-ms', String(retryDelayMs));
-  onTransportMetrics?.({ retryReason: 'http_server_overloaded' });
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
-  });
-}
-
-function parseRetryAfterHeadersMs(headers: Headers): number | undefined {
-  const retryAfterMsHeader = headers.get('retry-after-ms');
-  if (retryAfterMsHeader !== null) {
-    const retryAfterMs = Number(retryAfterMsHeader);
-    if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
-      return retryAfterMs;
-    }
-  }
-
-  const retryAfter = headers.get('retry-after');
-  if (!retryAfter) {
-    return undefined;
-  }
-  const retryAfterSeconds = Number(retryAfter);
-  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
-    return retryAfterSeconds * 1_000;
-  }
-  const retryAt = Date.parse(retryAfter);
-  if (!Number.isFinite(retryAt)) {
-    return undefined;
-  }
-  return Math.max(0, retryAt - Date.now());
-}
-
 export async function countInputTokens(options: CountInputTokensOptions): Promise<number> {
   const init = {
     method: 'POST',
@@ -1625,7 +1724,7 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
     signal: toAbortSignal(options.token)
   };
   const response = options.authManager
-    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init, proxyAwareFetch)
+    ? await codexFetch(options.authManager, `${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, init, proxyAwareFetch, options.accountKey)
     : await proxyAwareFetch(`${normalizeBaseURL(options.baseURL)}/responses/input_tokens`, {
         ...init,
         headers: {
