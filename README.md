@@ -130,9 +130,13 @@ npm run package:vsix
 
 Release and Marketplace publishing details are documented in [docs/releasing.md](docs/releasing.md).
 
-## Remote-SSH
+## Remote workspaces
 
-The extension runs in the local UI extension host so it can use credentials stored on your computer. When working over Remote-SSH, keep the extension installed locally rather than installing a second copy on the remote host.
+In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the remote workspace host to work around [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25). It runs locally in local workspaces. No settings change is needed.
+
+VS Code SecretStorage credentials remain available. The `~/.codex/auth.json` fallback is read on the host running the extension. If browser sign-in fails remotely, use **Codex for Copilot: Sign in with Device Code**.
+
+This preference remains remote after [VS Code fixes the routing bug](https://github.com/microsoft/vscode/issues/326554); it does not automatically switch back to the local host.
 
 ## License
 
