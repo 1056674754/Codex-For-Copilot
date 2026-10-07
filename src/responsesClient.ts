@@ -62,7 +62,6 @@ const WEBSOCKET_CLOSING = 2;
 const WEBSOCKET_CLOSED = 3;
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = 'previous_response_not_found';
 const PREVIOUS_RESPONSE_ID_PARAM = 'previous_response_id';
-const UNSUPPORTED_PREVIOUS_RESPONSE_ID_MESSAGE = 'Unsupported parameter: previous_response_id';
 const INVALID_PREVIOUS_RESPONSE_ID_MESSAGES = new Set([
   'Invalid previous_response_id.',
   'Invalid `previous_response_id`.'
@@ -214,9 +213,7 @@ export function isResponsesContinuationMissPayload(error: unknown): boolean {
   let matched = false;
   walkErrorEnvelope(error, (value) => {
     if (typeof value === 'string') {
-      const normalized = value.trim().replaceAll('`', '').replace(/\.$/, '');
-      matched = INVALID_PREVIOUS_RESPONSE_ID_MESSAGES.has(value.trim())
-        || normalized === UNSUPPORTED_PREVIOUS_RESPONSE_ID_MESSAGE;
+      matched = INVALID_PREVIOUS_RESPONSE_ID_MESSAGES.has(value.trim());
       return !matched;
     }
     if (typeof value !== 'object' || value === null) {
@@ -344,6 +341,15 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
     if (options.previousResponseId) {
       if (error instanceof ResponsesContinuationMissError) {
         throw error;
+      }
+
+      if (isUnsupportedHttpContinuationRejection(error)) {
+        throw new ResponsesContinuationMissError(
+          'Responses API rejected previous_response_id over HTTP.',
+          options.previousResponseId,
+          { cause: error instanceof Error ? error : undefined },
+          true
+        );
       }
 
       if (isResponsesContinuationMissPayload(error)) {
@@ -1752,7 +1758,12 @@ function parseToolCallInput(argumentsJson: string): object {
   }
 
   try {
-    const parsed = JSON.parse(argumentsJson);
+    const parsed = JSON.parse(argumentsJson, (key, value) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        return undefined;
+      }
+      return value;
+    });
 
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed;
@@ -1762,6 +1773,26 @@ function parseToolCallInput(argumentsJson: string): object {
   } catch {
     return { _raw: argumentsJson };
   }
+}
+
+function isUnsupportedHttpContinuationRejection(error: unknown): boolean {
+  if (!(error instanceof APIError) || error.status !== 400) {
+    return false;
+  }
+
+  const rejection = 'Unsupported parameter: previous_response_id';
+  let matched = false;
+  // The SDK may preserve a top-level detail only in its status-prefixed message.
+  walkErrorEnvelope({ error: error.error, message: error.message.replace(/^400\s+/, '') }, (value) => {
+    if (typeof value === 'string') {
+      matched = value.trim() === rejection;
+    } else if (typeof value === 'object' && value !== null) {
+      const detail = readOwnErrorProperty(value, 'detail');
+      matched = typeof detail === 'string' && detail.trim() === rejection;
+    }
+    return !matched;
+  });
+  return matched;
 }
 
 function isOpaqueHttpContinuationRejection(error: unknown): boolean {
@@ -1775,7 +1806,7 @@ function isFunctionCallContinuationIntegrityError(error: unknown): boolean {
     .some((message) => /no tool call found for function call output with call_id|no tool output found for function call\b/i.test(message));
 }
 
-function normalizeResponsesError(error: unknown, baseURL: string): Error {
+export function normalizeResponsesError(error: unknown, baseURL: string): Error {
   const endpoint = `${normalizeBaseURL(baseURL)}/responses`;
 
   if (error instanceof ResponsesStreamRateLimitError) {

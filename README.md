@@ -24,7 +24,7 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 - **Automatic model discovery** — exposes available upstream Codex models with configurable fallbacks.
 - **Fast streaming transport** — supports reusable WebSocket sessions with HTTP fallback.
 - **VS Code tool support** — forwards built-in, extension, and MCP tool calls through the Responses API.
-- **Hosted Web Search** — optionally gives Codex live web access through OpenAI's native Responses tool, with clickable sources.
+- **Hosted Web Search** — optionally gives Codex live web access through OpenAI's native Responses tool, with clickable sources. The same `#webSearch` tool also works with other tool-capable VS Code models.
 - **Optional Native Tool Search** — lets compatible Codex models search selected Agent tools on demand when you explicitly enable it.
 - **Conversation continuity** — reuses compatible response branches for efficient follow-up turns.
 - **Usage visibility** — shows available account limits or Credits in the status bar when supplied by the backend.
@@ -44,13 +44,13 @@ Open the Command Palette and choose one of the following:
 - **`Codex for Copilot: Import Codex auth.json`** to import existing Codex CLI ChatGPT credentials.
 - **`Codex: Set API Key`** to store an API key in VS Code SecretStorage.
 
-The extension stores imported and signed-in ChatGPT credentials in VS Code SecretStorage and refreshes them automatically, including refresh-token rotation. Importing copies the credentials and never writes to the original `~/.codex/auth.json` file; signing out of an imported credential only removes the extension's copy. The direct `~/.codex/auth.json` fallback remains read-only.
+The extension stores imported and signed-in ChatGPT credentials in VS Code SecretStorage and refreshes them automatically, including refresh-token rotation. On activation and every five minutes while VS Code is running, it checks all stored accounts (including inactive ones) and refreshes only those due. Importing copies the credentials and never writes to the original `~/.codex/auth.json` file; signing out of an imported credential only removes the extension's copy. The direct `~/.codex/auth.json` fallback remains read-only. If another client rotates or revokes an imported refresh token, the extension's copy cannot recover automatically; sign in through this extension for separate credentials, or re-import a current `auth.json` for that account.
 
 ### 3. Select Codex
 
 Open VS Code Chat, choose **Codex** from the model picker, and start chatting or using Agent mode.
 
-To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. The Codex backend executes the search directly; the extension does not expose it as a VS Code function call.
+To give a request live web access, enable **Web Search** in the Chat tools picker or reference `#webSearch` in the prompt. With a Codex model the Codex backend executes the search directly through OpenAI's hosted `web_search` tool. With any other tool-capable VS Code model, the same `#webSearch` tool runs one isolated Responses request that also uses OpenAI's hosted `web_search` tool and returns the synthesized answer plus sources.
 
 Web Search settings under **Settings → Extensions → Codex** let you choose live or cached access, search context size, and an optional domain allowlist. You can also choose whether Chat shows compact statuses, search/open/find actions, or actions with clickable source pages.
 
@@ -101,6 +101,7 @@ Most users can keep the defaults. Advanced settings are available under **Settin
 
 - credential source
 - backend URL
+- model catalog `client_version` override (defaults to `999.0.0` for discovery only; does not change Codex protocol headers)
 - HTTP or WebSocket transport
 - fallback model and model visibility
 - reasoning effort and service tier
@@ -129,9 +130,13 @@ npm run package:vsix
 
 Release and Marketplace publishing details are documented in [docs/releasing.md](docs/releasing.md).
 
-## Remote-SSH
+## Remote workspaces
 
-The extension runs in the local UI extension host so it can use credentials stored on your computer. When working over Remote-SSH, keep the extension installed locally rather than installing a second copy on the remote host.
+In Remote-SSH, Dev Containers, WSL, and Codespaces, the extension prefers the remote workspace host to work around [issue #25](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/25). It runs locally in local workspaces. No settings change is needed.
+
+VS Code SecretStorage credentials remain available. The `~/.codex/auth.json` fallback is read on the host running the extension. If browser sign-in fails remotely, use **Codex for Copilot: Sign in with Device Code**.
+
+This preference remains remote after [VS Code fixes the routing bug](https://github.com/microsoft/vscode/issues/326554); it does not automatically switch back to the local host.
 
 ## License
 

@@ -2,6 +2,62 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## [1.9.7](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.6...v1.9.7) (2026-09-30)
+
+
+### Bug Fixes
+
+* **auth:** preserve account IDs from nested JWT claims ([#110](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/110)) ([63bf1a8](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/63bf1a8174a4884c252c75d2f3cb8a8dda898f09))
+
+
+### Performance Improvements
+
+* **streaming:** reduce tool-call presentation overhead ([#109](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/109)) ([10a7757](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/10a775776f7e05d4580c9e7653b5c0efb6ea0b4b))
+
+## [1.9.6](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.5...v1.9.6) (2026-09-28)
+
+
+### Bug Fixes
+
+* **auth:** refresh credentials for all stored accounts ([#107](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/107)) ([7b9a386](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/7b9a386409c083e5098116ed3059328265c074e0))
+
+## [1.9.5](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.4...v1.9.5) (2026-09-27)
+
+
+### Bug Fixes
+
+* **remote:** prefer workspace host for Codex models ([#102](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/102)) ([4c10840](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/4c10840bb7223ae86eecca44b8141ba93ecdd684))
+* safely deserialize tool call input (CWE-502) ([#104](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/104)) ([e9b3e5f](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/e9b3e5fb7e510d10a94d960ba0f9eb199f952049))
+
+## [1.9.4](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.3...v1.9.4) (2026-09-23)
+
+
+### Bug Fixes
+
+* **models:** discover new Codex models automatically ([#99](https://github.com/GaussianGuaicai/Codex-For-Copilot/pull/99)) ([26ac812](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/26ac81248ef035163e37b7bebf9d810e23dd8879))
+* **release:** validate single-commit squash titles ([#100](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/100)) ([606509b](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/606509bc3d60fa4229b88184edf972fe24978f41))
+
+## [1.9.3](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.2...v1.9.3) (2026-09-20)
+
+
+### Bug Fixes
+
+* **http:** Fix HTTP continuation recovery for unsupported previous_response_id ([#96](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/96)) ([6d83780](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/6d83780c687e65f90467a3bf7bc92f908bafa975))
+
+## [1.9.2](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.1...v1.9.2) (2026-09-16)
+
+
+### Bug Fixes
+
+* **web-search:** make #webSearch usable by any tool-capable model ([#92](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/92)) ([3bca92e](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/3bca92e22eee0deef49678c308cd35fa038d1bea))
+
+## [1.9.1](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.0...v1.9.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **multi-account:** multi-account Codex identity storage ([#93](https://github.com/GaussianGuaicai/Codex-For-Copilot/issues/93)) ([38d63f1](https://github.com/GaussianGuaicai/Codex-For-Copilot/commit/38d63f1cff2c99f5eb75e3ffbffc8b9e36460235))
+
 ## [1.9.0](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.8.1...v1.9.0) (2026-09-08)
 
 

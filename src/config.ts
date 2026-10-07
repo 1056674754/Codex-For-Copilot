@@ -8,6 +8,8 @@ import {
   type RequestIdentitySettings
 } from './codexRequestIdentity';
 
+export const CODEX_CATALOG_CLIENT_VERSION = '999.0.0';
+
 export interface ModelPricing {
   input?: number;
   cachedInput?: number;
@@ -42,6 +44,7 @@ export interface ProviderConfig {
   instructions: string;
   defaultServiceTier?: 'default' | 'fast';
   defaultReasoningEffort?: KnownReasoningEffort;
+  accountUsageShowAccountName: boolean;
   maxOutputTokens: number;
   modelPricingUsdPerMTok: Record<string, ModelPricing>;
 }
@@ -51,7 +54,7 @@ export function getProviderConfig(): ProviderConfig {
 
   return {
     baseURL: config.get('baseURL', 'https://chatgpt.com/backend-api/codex/responses'),
-    clientVersion: config.get('clientVersion', '0.0.0'),
+    clientVersion: config.get('clientVersion', CODEX_CATALOG_CLIENT_VERSION),
     credentialsSource: config.get('credentialsSource', 'auto'),
     transport: normalizeTransport(config.get('transport', 'auto')),
     maxRetries: normalizeMaxRetries(config.get('maxRetries', 15)),
@@ -87,6 +90,7 @@ export function getProviderConfig(): ProviderConfig {
     instructions: config.get('instructions', 'You are a helpful coding assistant integrated with VS Code.'),
     defaultServiceTier: normalizeDefaultServiceTier(config.get('defaultServiceTier', 'auto')),
     defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
+    accountUsageShowAccountName: config.get('accountUsageShowAccountName', false),
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };

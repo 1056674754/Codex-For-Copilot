@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { randomUUID } from 'node:crypto';
+import { identityForCredential, isSameCodexAccountOwner } from './codexAccountIdentity';
 import { decodeJwtPayload } from './codexJwt';
 import type { CodexAuthBundle, CodexCredentialRecord, LegacyCodexCredentialRecord, RefreshableCodexCredentialRecord } from './codexAuthTypes';
 
@@ -57,10 +59,10 @@ export class CodexSecretStore {
     return raw ? parseCredential(raw) : undefined;
   }
 
-  /** Persist a record under a derived account key; returns the key used. */
+  /** Persist a refreshable record, reusing a verified owner slot or allocating a local opaque key. */
   async setCredential(record: RefreshableCodexCredentialRecord, accountKey?: string): Promise<string> {
     await this.migrateLegacyIfNeeded();
-    const key = accountKey ?? await this.findExistingAccountKey(record) ?? deriveAccountKey(record);
+    const key = accountKey ?? await this.findAccountKeyFor(record) ?? `account-${randomUUID()}`;
     await this.secrets.store(this.accountKeyFor(key), JSON.stringify(record));
     await this.addToIndex(key);
     return key;
@@ -94,19 +96,6 @@ export class CodexSecretStore {
 
   private accountKeyFor(accountKey: string): string {
     return `${ACCOUNT_SECRET_PREFIX}${accountKey}`;
-  }
-
-  private async findExistingAccountKey(record: CodexCredentialRecord): Promise<string | undefined> {
-    const identity = credentialIdentity(record);
-    if (!identity) return undefined;
-    for (const accountKey of (await this.readIndex()).accountKeys) {
-      const raw = await this.secrets.get(this.accountKeyFor(accountKey));
-      const existing = raw ? parseCredential(raw) : undefined;
-      if (existing && credentialIdentity(existing) === identity) {
-        return accountKey;
-      }
-    }
-    return undefined;
   }
 
   private async readIndex(): Promise<AccountsIndex> {
@@ -143,6 +132,18 @@ export class CodexSecretStore {
     await this.writeIndex(index);
   }
 
+  private async findAccountKeyFor(record: RefreshableCodexCredentialRecord): Promise<string | undefined> {
+    const incomingIdentity = identityForCredential(record);
+    for (const accountKey of (await this.readIndex()).accountKeys) {
+      const raw = await this.secrets.get(this.accountKeyFor(accountKey));
+      const stored = raw ? parseCredential(raw) : undefined;
+      if (isRefreshableCredential(stored) && isSameCodexAccountOwner(incomingIdentity, identityForCredential(stored))) {
+        return accountKey;
+      }
+    }
+    return undefined;
+  }
+
   /** Move the legacy single-key record into a derived account key. Runs once. */
   private async migrateLegacyIfNeeded(): Promise<void> {
     const legacyRaw = await this.secrets.get(CODEX_AUTH_SECRET_KEY);
@@ -175,33 +176,19 @@ function parseCredential(raw: string): CodexCredentialRecord | undefined {
 
 /** Stable per-account secret suffix derived from the credential's identity. */
 function deriveAccountKey(record: CodexCredentialRecord): string {
-  const identity = credentialIdentity(record);
-  if (identity) return sanitize(identity);
-  return sanitize(`account-${record.revision}`);
-}
-
-function credentialIdentity(record: CodexCredentialRecord): string | undefined {
-  const accountId = isRefreshableCredential(record) ? record.tokens.account_id?.trim() : record.accountId?.trim();
-  const payload = isRefreshableCredential(record) ? safeJwtPayload(record.tokens.id_token) : undefined;
-  const subject = stringClaim(payload, 'sub');
-  const email = record.email?.trim() || stringClaim(payload, 'email');
-  const principal = subject || email;
-  if (principal && accountId) return `${principal}--${accountId}`;
-  return principal || accountId || undefined;
-}
-
-function safeJwtPayload(token: string): Record<string, unknown> | undefined {
-  try {
-    const payload = decodeJwtPayload(token);
-    return payload && typeof payload === 'object' ? payload as Record<string, unknown> : undefined;
-  } catch {
-    return undefined;
+  const accountId = isRefreshableCredential(record) ? record.tokens.account_id : record.accountId;
+  if (accountId?.trim()) return sanitize(accountId.trim());
+  if (record.email?.trim()) return sanitize(record.email.trim());
+  if (isRefreshableCredential(record)) {
+    try {
+      const payload = decodeJwtPayload(record.tokens.id_token);
+      if (payload && typeof payload === 'object') {
+        const email = (payload as Record<string, unknown>).email;
+        if (typeof email === 'string' && email.trim()) return sanitize(email.trim());
+      }
+    } catch { /* fall through */ }
   }
-}
-
-function stringClaim(payload: Record<string, unknown> | undefined, name: string): string | undefined {
-  const value = payload?.[name];
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  return sanitize(`account-${record.revision}`);
 }
 
 function sanitize(value: string): string {

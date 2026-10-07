@@ -1,8 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { LogLevel } from 'vscode';
 
 export type LogFields = Record<string, unknown>;
+type LogFieldsSource = LogFields | (() => LogFields);
 
 export interface CodexLogSink {
+  readonly logLevel?: LogLevel;
   trace?(message: string, ...args: unknown[]): void;
   debug(message: string, ...args: unknown[]): void;
   info(message: string, ...args: unknown[]): void;
@@ -11,6 +14,7 @@ export interface CodexLogSink {
 }
 
 export type CodexLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
+const LOG_LEVEL_VALUES: Record<CodexLogLevel, number> = { trace: 1, debug: 2, info: 3, warn: 4, error: 5 };
 
 const MAX_DEPTH = 5;
 const MAX_FIELDS = 40;
@@ -21,7 +25,7 @@ const MAX_ERROR_CAUSES = 3;
 const SECRET_KEY = /(?:^|[_-])(authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|password|secret)(?:$|[_-])/i;
 const CONTENT_KEY = /^(?:prompt|instructions|input|output|content|reasoning|arguments?|result|encrypted|toolArguments|toolResult)$/i;
 const TURN_STATE_KEY = /(?:turn[_-]?state|sticky[_-]?state)/i;
-const IDENTIFIER_KEY = /(?:^|[_-])(response|previous[_-]?response|branch|call|thread|turn|session|installation|window)(?:[_-]?(?:id|key))?$/i;
+const IDENTIFIER_KEY = /(?:^|[_-])(response|previous[_-]?response|branch|call|thread|turn|session|installation|window|account)(?:[_-]?(?:id|key))?$|(?:response|previousResponse|branch|call|thread|turn|session|installation|window|account)(?:Id|Key)$/i;
 
 export class CodexLogger {
   private readonly context: LogFields;
@@ -62,22 +66,30 @@ export class CodexLogger {
     return this.with({ attempt });
   }
 
-  trace(event: string, fields?: LogFields): void { this.write('trace', event, fields); }
-  debug(event: string, fields?: LogFields): void { this.write('debug', event, fields); }
+  isEnabled(level: CodexLogLevel): boolean {
+    return LOG_LEVEL_VALUES[level] >= (this.sink.logLevel ?? 1);
+  }
+
+  trace(event: string, fields?: LogFieldsSource): void { this.write('trace', event, fields); }
+  debug(event: string, fields?: LogFieldsSource): void { this.write('debug', event, fields); }
   info(event: string, fields?: LogFields): void { this.write('info', event, fields); }
   warn(event: string, fields?: LogFields): void { this.write('warn', event, fields); }
 
   error(event: string, error?: unknown, fields?: LogFields): void {
-    this.write('error', event, { ...fields, error: serializeError(error) });
+    this.write('error', event, () => ({ ...fields, error: serializeError(error) }));
   }
 
-  private write(level: CodexLogLevel, event: string, fields: LogFields = {}): void {
+  private write(level: CodexLogLevel, event: string, fields: LogFieldsSource = {}): void {
     try {
-      if (this.legacySink) {
-        this.writeToSink(level, event, fields);
+      if (!this.isEnabled(level)) {
         return;
       }
-      const payload = sanitizeLogFields({ ...this.context, ...fields });
+      const resolvedFields = typeof fields === 'function' ? fields() : fields;
+      if (this.legacySink) {
+        this.writeToSink(level, event, resolvedFields);
+        return;
+      }
+      const payload = sanitizeLogFields({ ...this.context, ...resolvedFields });
       const message = `[${payload.component ?? 'extension'}] ${event} ${stableStringify(payload)}`;
       this.writeToSink(level, message);
     } catch {
@@ -87,21 +99,22 @@ export class CodexLogger {
 
   private writeToSink(level: CodexLogLevel, message: string, payload?: LogFields): void {
     try {
+      const args = payload === undefined ? [] : [payload];
       switch (level) {
         case 'trace':
-          this.sink.trace?.(message, payload);
+          this.sink.trace?.(message, ...args);
           return;
         case 'debug':
-          this.sink.debug(message, payload);
+          this.sink.debug(message, ...args);
           return;
         case 'info':
-          this.sink.info(message, payload);
+          this.sink.info(message, ...args);
           return;
         case 'warn':
-          this.sink.warn(message, payload);
+          this.sink.warn(message, ...args);
           return;
         case 'error':
-          this.sink.error(message, payload);
+          this.sink.error(message, ...args);
       }
     } catch {
       // Logging must never affect the provider or authentication flow.

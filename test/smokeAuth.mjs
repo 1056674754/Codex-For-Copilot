@@ -53,8 +53,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 await import('node:fs/promises').then(({ writeFile }) => writeFile(entryPath, `
 export * from ${repoImport('src/auth/codexAuthJsonImporter')};
+export * from ${repoImport('src/auth/codexAccountIdentity')};
 export * from ${repoImport('src/auth/codexJwt')};
 export * from ${repoImport('src/auth/codexAuthManager')};
+export * from ${repoImport('src/auth/codexAuthTypes')};
 export * from ${repoImport('src/auth/codexAuthRequest')};
 export * from ${repoImport('src/auth/codexAuthLock')};
 export * from ${repoImport('src/auth/codexSecretStore')};
@@ -62,6 +64,7 @@ export * from ${repoImport('src/auth/codexPkce')};
 export * from ${repoImport('src/auth/codexOAuthClient')};
 export * from ${repoImport('src/auth/codexAuthenticationProvider')};
 export * from ${repoImport('src/auth/codexLoopbackLogin')};
+export * from ${repoImport('src/secrets')};
 `));
 
 await build({
@@ -101,6 +104,84 @@ try {
   assertEqual(auth.isJwtExpiringSoon(soonToken, 5 * 60 * 1000), true, 'expiring soon');
   assertEqual(auth.needsRefresh({ ...valid, tokens: { ...valid.tokens, access_token: soonToken } }), true, 'refresh when access token expires soon');
   assertEqual(auth.needsRefresh({ ...valid, last_refresh: new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString() }), true, 'refresh when last_refresh is old');
+
+  const nestedTokens = {
+    id_token: jwt({
+      'https://api.openai.com/auth': { chatgpt_account_id: 'nested-workspace', chatgpt_user_id: 'nested-user' },
+      'https://api.openai.com/profile': { email: 'nested@example.com' }
+    }),
+    access_token: futureToken,
+    refresh_token: 'nested-refresh'
+  };
+  const nestedIdentity = auth.parseCodexAccountIdentity(nestedTokens);
+  assertEqual(nestedIdentity.accountId, 'nested-workspace', 'identity parser reads the nested workspace claim without account_id');
+  assertEqual(nestedIdentity.userId, 'nested-user', 'identity parser reads the nested user claim');
+  assertEqual(nestedIdentity.email, 'nested@example.com', 'identity parser reads the nested profile email');
+  const explicitIdentity = auth.parseCodexAccountIdentity({ ...nestedTokens, account_id: 'explicit-workspace' }, 'explicit@example.com');
+  assertEqual(explicitIdentity.accountId, 'explicit-workspace', 'explicit workspace selection takes precedence over JWT claims');
+  assertEqual(explicitIdentity.email, 'explicit@example.com', 'explicit email takes precedence over JWT claims');
+  const legacyIdentity = auth.parseCodexAccountIdentity({
+    ...nestedTokens,
+    id_token: jwt({
+      'https://api.openai.com/auth.chatgpt_account_id': 'legacy-workspace',
+      'https://api.openai.com/auth.user_id': 'legacy-user',
+      'https://api.openai.com/profile.email': 'legacy@example.com'
+    })
+  });
+  assertEqual(legacyIdentity.accountId, 'legacy-workspace', 'legacy dotted workspace claims remain supported');
+  assertEqual(legacyIdentity.userId, 'legacy-user', 'legacy dotted user claims remain supported');
+  assertEqual(legacyIdentity.email, 'legacy@example.com', 'legacy dotted profile claims remain supported');
+  assertEqual(auth.parseCodexAccountIdentity({
+    ...nestedTokens,
+    id_token: jwt({ 'https://api.openai.com/auth': { user_id: 'alternate-user' } })
+  }).userId, 'alternate-user', 'nested user_id remains a supported owner claim');
+  for (const invalidClaim of [null, [], 'invalid', { chatgpt_account_id: 42, chatgpt_user_id: false, email: [] }]) {
+    const identity = auth.parseCodexAccountIdentity({
+      ...nestedTokens,
+      id_token: jwt({ 'https://api.openai.com/auth': invalidClaim, 'https://api.openai.com/profile': invalidClaim })
+    });
+    assertEqual(JSON.stringify(identity), '{}', 'malformed namespaced claims are ignored');
+  }
+  assertEqual(auth.parseCodexAccountIdentity({ ...nestedTokens, id_token: 'malformed', account_id: 'explicit-workspace' }).accountId, 'explicit-workspace', 'malformed JWTs do not discard explicit workspace selection');
+
+  const nestedSecrets = new Map();
+  const nestedStore = new auth.CodexSecretStore({
+    async get(key) { return nestedSecrets.get(key); },
+    async store(key, value) { nestedSecrets.set(key, value); },
+    async delete(key) { nestedSecrets.delete(key); }
+  });
+  const nestedOAuth = new auth.CodexOAuthClient(async () => new Response(JSON.stringify(nestedTokens), { status: 200 }));
+  const nestedManager = new auth.CodexAuthManager(
+    nestedStore,
+    () => ({ async withLock(callback) { return callback(); } }),
+    nestedOAuth
+  );
+  const nestedLoginTokens = await nestedOAuth.exchangeAuthorizationCode('test-code', 'http://localhost/auth/callback', 'test-verifier');
+  assertEqual(nestedLoginTokens.account_id, undefined, 'OAuth regression fixture has no top-level account_id');
+  const nestedKey = await nestedManager.completeSignIn(nestedLoginTokens);
+  assertEqual((await nestedManager.getCredentialSnapshot(nestedKey)).accountId, 'nested-workspace', 'native sign-in resolves the workspace from the JWT');
+  assertEqual((await nestedManager.getStatus(nestedKey)).accountId, 'nested-workspace', 'auth status reports the resolved workspace');
+  assertEqual((await nestedManager.listAccounts())[0].accountId, 'nested-workspace', 'account listing reports the resolved workspace');
+  assertEqual(await nestedManager.completeSignIn(nestedLoginTokens), nestedKey, 'signing in again reuses the verified nested owner');
+  const restoredNestedManager = new auth.CodexAuthManager(
+    nestedStore,
+    () => ({ async withLock(callback) { return callback(); } }),
+    { async refresh() { throw new Error('stored snapshots must not refresh'); }, async revoke() {} }
+  );
+  assertEqual((await restoredNestedManager.getStoredCredentialSnapshot(nestedKey)).accountId, 'nested-workspace', 'existing OAuth records without account_id work without signing in again');
+  const storedNestedCredentials = await auth.getCodexCredentialsForAccount(restoredNestedManager, nestedKey, false);
+  assertEqual(storedNestedCredentials.headers['ChatGPT-Account-ID'], 'nested-workspace', 'inactive account usage retains the resolved workspace header');
+  restoredNestedManager.dispose();
+  const nestedHeaders = [];
+  const nestedResponse = await auth.codexFetch(nestedManager, 'https://example.test/usage', {}, async (_input, init) => {
+    nestedHeaders.push(init.headers['ChatGPT-Account-ID']);
+    return new Response('', { status: nestedHeaders.length === 1 ? 401 : 200 });
+  }, nestedKey);
+  assertEqual(nestedResponse.status, 200, 'nested OAuth credentials recover after a refresh');
+  assertEqual(JSON.stringify(nestedHeaders), JSON.stringify(['nested-workspace', 'nested-workspace']), 'initial and refreshed requests both send the workspace header');
+  const refreshedNestedCredentials = await auth.getCodexCredentialsForAccount(nestedManager, nestedKey);
+  assertEqual(refreshedNestedCredentials.headers['ChatGPT-Account-ID'], 'nested-workspace', 'active provider credentials retain the resolved workspace header');
+  nestedManager.dispose();
 
   const importedSecrets = new Map();
   const importedSecretStorage = {
@@ -150,6 +231,232 @@ try {
   importedSubscription.dispose();
   importedManager.dispose();
 
+  const staleSecrets = new Map();
+  const staleStorage = new auth.CodexSecretStore({
+    async get(key) { return staleSecrets.get(key); },
+    async store(key, value) { staleSecrets.set(key, value); },
+    async delete(key) { staleSecrets.delete(key); }
+  });
+  let staleRefreshCalls = 0;
+  const staleManager = new auth.CodexAuthManager(
+    staleStorage,
+    () => ({ async withLock(callback) { return callback(); } }),
+    {
+      async refresh(refreshToken) {
+        staleRefreshCalls += 1;
+        if (refreshToken !== 'initial-refresh') throw new Error('Refresh token was already rotated.');
+        return { access_token: 'new-access', refresh_token: 'rotated-refresh' };
+      },
+      async revoke() {}
+    }
+  );
+  const staleAccountKey = await staleManager.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { id_token: futureToken, access_token: futureToken, refresh_token: 'initial-refresh' }
+  }));
+  const staleSnapshot = await staleManager.getCredentialSnapshot(staleAccountKey);
+  const staleContext = { accountKey: staleAccountKey, snapshotRevision: staleSnapshot.revision, visibleActivity: false, reason: 'http401' };
+  const refreshedSnapshot = await staleManager.recoverFromUnauthorized(staleContext);
+  const delayedRetrySnapshot = await staleManager.recoverFromUnauthorized(staleContext);
+  assertEqual(delayedRetrySnapshot.accessToken, refreshedSnapshot.accessToken, 'delayed 401 reuses the token refreshed for its original revision');
+  assertEqual(staleRefreshCalls, 1, 'delayed 401 does not rotate a one-use refresh token twice');
+  staleManager.dispose();
+
+  const lockedSecrets = new Map();
+  const lockedStorage = new auth.CodexSecretStore({
+    async get(key) { return lockedSecrets.get(key); },
+    async store(key, value) { lockedSecrets.set(key, value); },
+    async delete(key) { lockedSecrets.delete(key); }
+  });
+  let lockedRefreshCalls = 0;
+  const lockedOAuth = {
+    async refresh() {
+      lockedRefreshCalls += 1;
+      if (lockedRefreshCalls > 1) throw new Error('Cross-window refresh token was already rotated.');
+      return { access_token: 'locked-new-access', refresh_token: 'locked-new-refresh' };
+    },
+    async revoke() {}
+  };
+  const firstWindow = new auth.CodexAuthManager(lockedStorage, () => ({ async withLock(callback) { return callback(); } }), lockedOAuth);
+  const lockedAccountKey = await firstWindow.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt', tokens: { id_token: futureToken, access_token: futureToken, refresh_token: 'locked-original-refresh' }
+  }));
+  const lockedOriginal = await firstWindow.getCredentialSnapshot(lockedAccountKey);
+  const lockedContext = { accountKey: lockedAccountKey, snapshotRevision: lockedOriginal.revision, visibleActivity: false, reason: 'http401' };
+  const secondWindow = new auth.CodexAuthManager(lockedStorage, () => ({ async withLock(callback) {
+    await firstWindow.recoverFromUnauthorized(lockedContext);
+    return callback();
+  } }), lockedOAuth);
+  const lockedResult = await secondWindow.recoverFromUnauthorized(lockedContext);
+  assertEqual(lockedResult.accessToken, 'locked-new-access', 'waiting window reads rotated credentials after acquiring the lock');
+  assertEqual(lockedRefreshCalls, 1, 'waiting window does not reuse a refresh token rotated by another window');
+  firstWindow.dispose();
+  secondWindow.dispose();
+
+  const rejectedSecrets = new Map();
+  const rejectedStorage = new auth.CodexSecretStore({
+    async get(key) { return rejectedSecrets.get(key); },
+    async store(key, value) { rejectedSecrets.set(key, value); },
+    async delete(key) { rejectedSecrets.delete(key); }
+  });
+  let rejectedRefreshCalls = 0;
+  const rejectedManager = new auth.CodexAuthManager(
+    rejectedStorage,
+    () => ({ async withLock(callback) { return callback(); } }),
+    {
+      async refresh() {
+        rejectedRefreshCalls += 1;
+        throw new auth.TokenRefreshError('Refresh credential rejected.', true, 401, 'invalid_grant');
+      },
+      async revoke() {}
+    }
+  );
+  const rejectedEvents = [];
+  rejectedManager.onDidChangeAuth((event) => rejectedEvents.push(event));
+  const rejectedAccountKey = await rejectedManager.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt', tokens: { id_token: futureToken, access_token: soonToken, refresh_token: 'rejected-refresh', account_id: 'workspace-rejected' }
+  }));
+  await assertRejects(() => rejectedManager.getCredentialSnapshot(rejectedAccountKey), 'permanent proactive refresh rejection requires reauthentication');
+  assertEqual((await rejectedManager.getStatus(rejectedAccountKey)).reauthRequired, true, 'rejected proactive refresh marks the account as requiring reauthentication');
+  await assertRejects(() => rejectedManager.getCredentialSnapshot(rejectedAccountKey), 'rejected account does not refresh again');
+  assertEqual(rejectedRefreshCalls, 1, 'permanent proactive rejection does not flood the token endpoint');
+  assertEqual(rejectedEvents.filter((event) => event.reason === 'reauthRequired').length, 1, 'permanent proactive rejection emits one reauthentication event');
+  await rejectedManager.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt', tokens: { id_token: futureToken, access_token: futureToken, refresh_token: 'recovered-refresh', account_id: 'workspace-rejected' }
+  }));
+  assertEqual((await rejectedManager.getStatus(rejectedAccountKey)).reauthRequired, false, 'fresh re-import clears reauthentication state');
+  const stillValidSnapshot = await rejectedManager.getCredentialSnapshot(rejectedAccountKey);
+  await assertRejects(() => rejectedManager.recoverFromUnauthorized({
+    accountKey: rejectedAccountKey,
+    snapshotRevision: stillValidSnapshot.revision,
+    visibleActivity: false,
+    reason: 'http401'
+  }), '401 refresh rejection requires reauthentication even before access-token expiry');
+  await assertRejects(() => rejectedManager.getCredentialSnapshot(rejectedAccountKey), 'rejected unexpired access token is not sent to the backend again');
+  rejectedManager.dispose();
+
+  const periodicSecrets = new Map();
+  const periodicCalls = [];
+  const periodicManager = new auth.CodexAuthManager(
+    new auth.CodexSecretStore({
+      async get(key) { return periodicSecrets.get(key); },
+      async store(key, value) { periodicSecrets.set(key, value); },
+      async delete(key) { periodicSecrets.delete(key); }
+    }),
+    () => ({ async withLock(callback) { return callback(); } }),
+    {
+      async refresh(refreshToken) {
+        periodicCalls.push(refreshToken);
+        if (refreshToken.startsWith('broken-')) throw new auth.TokenRefreshError('Revoked.', true, 401, 'invalid_grant');
+        return { access_token: futureToken, refresh_token: `rotated-${refreshToken}` };
+      },
+      async revoke() {}
+    }
+  );
+  const activeKey = await periodicManager.importAuthJson(authJsonFor('active', 'workspace', 'active@example.com', soonToken));
+  const inactiveKey = await periodicManager.importAuthJson(authJsonFor('inactive', 'workspace', 'inactive@example.com', soonToken));
+  const freshKey = await periodicManager.importAuthJson(authJsonFor('fresh', 'workspace', 'fresh@example.com', futureToken));
+  const brokenKey = await periodicManager.importAuthJson(JSON.stringify({
+    auth_mode: 'chatgpt', tokens: { ...authJsonTokens('broken', 'workspace', 'broken@example.com', soonToken), refresh_token: 'broken-refresh' }
+  }));
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let periodicTick;
+  let periodicInterval;
+  let periodicTimer;
+  let timerRegistrations = 0;
+  let timerCleared = false;
+  globalThis.setInterval = (callback, interval) => {
+    timerRegistrations += 1;
+    periodicTick = callback;
+    periodicInterval = interval;
+    periodicTimer = originalSetInterval(() => {}, interval);
+    return periodicTimer;
+  };
+  globalThis.clearInterval = (timer) => {
+    if (timer === periodicTimer) timerCleared = true;
+    return originalClearInterval(timer);
+  };
+  try {
+    await periodicManager.startPeriodicRefresh();
+    await periodicManager.startPeriodicRefresh();
+    assertEqual(timerRegistrations, 1, 'background refresh starts only one scheduler');
+    assertEqual(periodicInterval, 5 * 60 * 1000, 'background credential refresh checks every five minutes');
+    assertEqual(JSON.stringify(periodicCalls.sort()), JSON.stringify(['active-workspace-refresh', 'broken-refresh', 'inactive-workspace-refresh'].sort()), 'startup checks active and inactive expiring accounts independently');
+    assertEqual((await periodicManager.getActiveAccountKey()), activeKey, 'background refresh does not switch accounts');
+    assertEqual((await periodicManager.getStoredCredentialSnapshot(inactiveKey)).accessToken, futureToken, 'inactive account stores its rotated access token');
+    assertEqual((await periodicManager.getStoredCredentialSnapshot(freshKey)).accessToken, futureToken, 'fresh inactive account is not refreshed unnecessarily');
+    assertEqual((await periodicManager.getStatus(brokenKey)).reauthRequired, true, 'a rejected inactive account is marked without blocking others');
+    const renewedInactive = new Promise((resolve) => {
+      const subscription = periodicManager.onDidChangeAuth((event) => {
+        if (event.reason === 'tokensRefreshed' && event.accountKey === inactiveKey) {
+          subscription.dispose();
+          resolve();
+        }
+      });
+    });
+    await periodicManager.importAuthJson(authJsonFor('inactive', 'workspace', 'inactive@example.com', soonToken));
+    periodicTick();
+    await renewedInactive;
+    assertEqual(periodicCalls.filter((token) => token === 'broken-refresh').length, 1, 'periodic ticks do not retry permanently rejected credentials');
+  } finally {
+    periodicManager.dispose();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+  assertEqual(timerCleared, true, 'disposing the auth manager stops periodic credential refresh');
+
+  const profileIdentity = auth.parseCodexAccountIdentity({
+    id_token: jwt({ 'https://api.openai.com/auth.chatgpt_user_id': 'profile-user', 'https://api.openai.com/profile.email': 'profile@example.com' }),
+    access_token: futureToken,
+    refresh_token: 'profile-refresh',
+    account_id: 'workspace-profile'
+  });
+  assertEqual(profileIdentity.email, 'profile@example.com', 'identity parser reads the profile email claim');
+
+  const multiAccountSecrets = new Map();
+  const multiAccountManager = createImportedManager(auth, multiAccountSecrets);
+  const userAWorkspaceOne = authJsonFor('user-a', 'workspace-1', 'a@example.com', 'user-a-token');
+  const userBWorkspaceOne = authJsonFor('user-b', 'workspace-1', 'b@example.com', 'user-b-token');
+  const userAWorkspaceTwo = authJsonFor('user-a', 'workspace-2', 'a@example.com', 'user-a-workspace-two-token');
+  const userAKey = await multiAccountManager.importAuthJson(userAWorkspaceOne);
+  const userBKey = await multiAccountManager.importAuthJson(userBWorkspaceOne);
+  assertEqual((await multiAccountManager.listAccounts()).length, 2, 'different users in one workspace retain separate accounts');
+  assertEqual(userAKey === userBKey, false, 'different users in one workspace receive distinct local keys');
+  await multiAccountManager.switchAccount(userAKey);
+  assertEqual((await multiAccountManager.getCredentialSnapshot()).accessToken, 'user-a-token', 'switching restores user A credentials');
+  await multiAccountManager.switchAccount(userBKey);
+  assertEqual((await multiAccountManager.getCredentialSnapshot()).accessToken, 'user-b-token', 'switching restores user B credentials');
+  const inactiveAccountCredentials = await auth.getCodexCredentialsForAccount(multiAccountManager, userAKey, false);
+  assertEqual(inactiveAccountCredentials.apiKey, 'user-a-token', 'inactive account usage credentials retain the stored token');
+  assertEqual(inactiveAccountCredentials.authManager, undefined, 'inactive account usage credentials do not trigger refresh or 401 retry');
+  const updatedUserAKey = await multiAccountManager.importAuthJson(authJsonFor('user-a', 'workspace-1', 'a@example.com', 'user-a-new-token'));
+  assertEqual(updatedUserAKey, userAKey, 're-importing the same owner reuses its local key');
+  assertEqual((await multiAccountManager.listAccounts()).length, 2, 're-importing the same owner does not duplicate the account');
+  assertEqual((await multiAccountManager.getCredentialSnapshot(userAKey)).accessToken, 'user-a-new-token', 're-importing updates the existing owner credentials');
+  const userAWorkspaceTwoKey = await multiAccountManager.importAuthJson(userAWorkspaceTwo);
+  assertEqual(userAWorkspaceTwoKey === userAKey, false, 'the same user in a different workspace receives a separate local key');
+  assertEqual((await multiAccountManager.listAccounts()).length, 3, 'the same user can retain independent workspace accounts');
+  const multiAccountProvider = new auth.CodexAuthenticationProvider(multiAccountManager);
+  const multiAccountSessions = await multiAccountProvider.getSessions(undefined, {});
+  assertEqual(multiAccountSessions.length, 3, 'each stored owner produces a VS Code authentication session');
+  assertEqual(new Set(multiAccountSessions.map((session) => session.id)).size, 3, 'stored owners produce distinct VS Code authentication session IDs');
+  multiAccountProvider.dispose();
+  multiAccountManager.dispose();
+
+  const legacyUserATokens = authJsonTokens('user-a', 'workspace-1', 'a@example.com', 'legacy-user-a-token');
+  const legacyV2Secrets = new Map([
+    ['codexForCopilot.codexAuthAccounts', JSON.stringify({ accountKeys: ['workspace-1'], activeAccountKey: 'workspace-1' })],
+    ['codexForCopilot.codexAuthAccount.workspace-1', JSON.stringify({ schemaVersion: 2, source: 'importedAuthJson', revision: 'legacy-user-a', tokens: legacyUserATokens, email: 'a@example.com', lastRefreshAt: new Date().toISOString() })]
+  ]);
+  const legacyV2Manager = createImportedManager(auth, legacyV2Secrets);
+  const legacyUserBKey = await legacyV2Manager.importAuthJson(userBWorkspaceOne);
+  assertEqual(legacyUserBKey === 'workspace-1', false, 'legacy workspace key does not overwrite another user in the workspace');
+  assertEqual(JSON.parse(legacyV2Secrets.get('codexForCopilot.codexAuthAccount.workspace-1')).tokens.access_token, 'legacy-user-a-token', 'legacy workspace credential remains unchanged');
+  assertEqual((await legacyV2Manager.listAccounts()).length, 2, 'legacy storage retains both owners after import');
+  assertEqual(await legacyV2Manager.importAuthJson(userAWorkspaceOne), 'workspace-1', 're-importing the legacy owner retains its existing workspace key');
+  legacyV2Manager.dispose();
+
   const rawImportedSecrets = new Map([
     ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens, last_refresh: new Date().toISOString() })]
   ]);
@@ -165,7 +472,7 @@ try {
   assertEqual(rawImportedSecrets.has('codexForCopilot.codexAuthBundle'), false, 'legacy single-key record is removed after migration');
   assertEqual(JSON.parse(rawImportedSecrets.get(`codexForCopilot.codexAuthAccount.${migratedKey}`)).source, 'importedAuthJson', 'pre-schema auth.json migration persists a stable schema-v2 record');
 
-  for (const failingKey of ['codexForCopilot.codexAuthAccount.user_example.com--acct_1', 'codexForCopilot.codexAuthAccounts']) {
+  for (const failingKey of ['codexForCopilot.codexAuthAccount.acct_1', 'codexForCopilot.codexAuthAccounts']) {
     const migrationSecrets = new Map([
       ['codexForCopilot.codexAuthBundle', JSON.stringify({ auth_mode: 'chatgpt', tokens: valid.tokens })]
     ]);
@@ -382,6 +689,8 @@ try {
   let signedInSnapshot;
   let signInOptions;
   const fakeAuthManager = {
+    credentialSnapshotCalls: 0,
+    storedCredentialSnapshotCalls: 0,
     onDidChangeAuth: authChanges.event,
     async getStatus() {
       return signedInSnapshot
@@ -395,6 +704,14 @@ try {
     },
     async getActiveAccountKey() { return signedInSnapshot ? 'acct_1' : undefined; },
     async getCredentialSnapshot() {
+      this.credentialSnapshotCalls += 1;
+      if (!signedInSnapshot) {
+        throw new Error('not signed in');
+      }
+      return signedInSnapshot;
+    },
+    async getStoredCredentialSnapshot() {
+      this.storedCredentialSnapshotCalls += 1;
       if (!signedInSnapshot) {
         throw new Error('not signed in');
       }
@@ -425,6 +742,8 @@ try {
   await flushEvents();
   assertEqual(signInOptions?.forceAccountSelection, true, 'VS Code session creation requests a distinct account chooser');
   assertEqual(session.account.id, 'acct_1', 'session uses Codex account ID');
+  assertEqual(fakeAuthManager.credentialSnapshotCalls, 0, 'session enumeration avoids refresh-capable credential reads');
+  assertEqual(fakeAuthManager.storedCredentialSnapshotCalls > 0, true, 'session enumeration reads stored credential snapshots');
   assertEqual(sessionChanges[0].added[0].id, session.id, 'sign-in adds a VS Code session');
   signedInSnapshot = { ...signedInSnapshot, accessToken: 'refreshed-access-token', revision: 'second' };
   authChanges.fire({ reason: 'tokensRefreshed' });
@@ -436,7 +755,7 @@ try {
   await assertRejects(() => authenticationProvider.createSession(['unsupported-scope'], {}), 'unsupported authentication scope rejected');
   authenticationProvider.dispose();
 
-  const multiAccountProvider = new auth.CodexAuthenticationProvider({
+  const filteredAccountProvider = new auth.CodexAuthenticationProvider({
     onDidChangeAuth: new EventEmitter().event,
     async listAccounts() {
       return [
@@ -444,7 +763,7 @@ try {
         { accountKey: 'acct_two', source: 'extensionOAuth', email: 'two@example.com', accountId: 'workspace', isActive: false, reauthRequired: false }
       ];
     },
-    async getCredentialSnapshot(accountKey) {
+    async getStoredCredentialSnapshot(accountKey) {
       return {
         source: 'extensionOAuth',
         accessToken: `token-${accountKey}`,
@@ -455,16 +774,16 @@ try {
       };
     }
   });
-  const allSessions = await multiAccountProvider.getSessions(undefined, {});
-  const filteredSessions = await multiAccountProvider.getSessions(undefined, {
+  const allSessions = await filteredAccountProvider.getSessions(undefined, {});
+  const filteredSessions = await filteredAccountProvider.getSessions(undefined, {
     account: allSessions[1].account
   });
   assertEqual(allSessions.length, 2, 'authentication provider exposes every stored account');
   assertEqual(filteredSessions.length, 1, 'authentication provider honors VS Code account filtering');
   assertEqual(filteredSessions[0].account.id, 'acct_two', 'authentication provider returns the requested account');
-  multiAccountProvider.dispose();
+  filteredAccountProvider.dispose();
 
-  console.log('Smoke test passed: auth import, PKCE, loopback completion, JWT parsing, refresh decisions, 401 retry, and VS Code authentication sessions are correct.');
+  console.log('Smoke test passed: multi-owner auth import, PKCE, loopback completion, JWT parsing, refresh decisions, 401 retry, and VS Code authentication sessions are correct.');
 } finally {
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
@@ -472,6 +791,34 @@ try {
 
 function jwt(payload) {
   return ['header', Buffer.from(JSON.stringify(payload)).toString('base64url'), 'signature'].join('.');
+}
+
+function authJsonFor(userId, accountId, email, accessToken) {
+  return JSON.stringify({ auth_mode: 'chatgpt', tokens: authJsonTokens(userId, accountId, email, accessToken) });
+}
+
+function authJsonTokens(userId, accountId, email, accessToken) {
+  return {
+    id_token: jwt({
+      'https://api.openai.com/auth': { chatgpt_user_id: userId, chatgpt_account_id: accountId },
+      'https://api.openai.com/profile': { email }
+    }),
+    access_token: accessToken,
+    refresh_token: `${userId}-${accountId}-refresh`,
+    account_id: accountId
+  };
+}
+
+function createImportedManager(authApi, secrets) {
+  return new authApi.CodexAuthManager(
+    new authApi.CodexSecretStore({
+      async get(key) { return secrets.get(key); },
+      async store(key, value) { secrets.set(key, value); },
+      async delete(key) { secrets.delete(key); }
+    }),
+    () => ({ async withLock(callback) { return callback(); } }),
+    { async refresh() { throw new Error('multi-account test credentials must not refresh'); }, async revoke() {} }
+  );
 }
 
 function assertEqual(actual, expected, label) {
