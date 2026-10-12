@@ -21,7 +21,7 @@ Codex For Copilot is a lightweight VS Code Language Model Provider that connects
 ## Highlights
 
 - **Native VS Code integration** — works in Chat and Agent mode through the standard model picker.
-- **Automatic model discovery** — exposes available upstream Codex models with configurable fallbacks.
+- **Automatic model discovery** — exposes available upstream Codex models with configurable fallbacks. This fork hides and locally blocks `gpt-5.6-luna` and `gpt-5.6-sol`; select GPT-6 Luna or GPT-6 Sol instead. Other models, including GPT-5.6 Terra, remain unchanged.
 - **Fast streaming transport** — supports reusable WebSocket sessions with HTTP fallback.
 - **VS Code tool support** — forwards built-in, extension, and MCP tool calls through the Responses API.
 - **Hosted Web Search** — optionally gives Codex live web access through OpenAI's native Responses tool, with clickable sources. The same `#webSearch` tool also works with other tool-capable VS Code models.

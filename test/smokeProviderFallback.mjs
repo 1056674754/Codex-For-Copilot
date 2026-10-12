@@ -314,7 +314,7 @@ async function runUnauthorizedLegacyToolCallSmokeTest() {
   const server = createServer((request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
     response.writeHead(200, {
@@ -351,7 +351,7 @@ async function runUnauthorizedLegacyToolCallSmokeTest() {
   try {
     const token = createCancellationToken();
     const model = (await provider.provideLanguageModelChatInformation({ silent: true }, token))
-      .find((candidate) => candidate.id === 'codex::gpt-5.6-sol');
+      .find((candidate) => candidate.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for unauthorized legacy tool-call coverage.');
     }
@@ -385,7 +385,7 @@ async function runNativeReplayValidationSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
     const chunks = [];
@@ -549,9 +549,9 @@ async function runNativeReplayValidationSmokeTest() {
     const token = createCancellationToken();
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')],
       'codexAccessToken'
-    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    ).find((item) => item.info.id === 'codex::gpt-5.7-sol')?.info;
     if (!model) {
       throw new Error('Expected model for Native replay validation coverage.');
     }
@@ -898,15 +898,15 @@ async function runModelCatalogMetadataSmokeTest() {
       baseURL: 'https://chatgpt.com/backend-api/codex/responses'
     };
     const rollbackCatalog = [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', { context_window: 272000, max_context_window: 872000 }),
       createMockModel('gpt-5.6-terra', 'GPT-5.6-Terra', { context_window: 272000, max_context_window: 872000 }),
-      createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.7-luna', 'GPT-5.7-Luna', { context_window: 272000, max_context_window: 872000 }),
       createMockModel('gpt-5.6-nova', 'GPT-5.6-Nova', { context_window: 272000, max_context_window: 272000 })
     ];
     const rollbackModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'codexAccessToken');
     const formattedGpt56MaximumContext = (872000).toLocaleString();
     assertEqual(rollbackModels.length, 4, 'eligible GPT-5.6 catalog keeps one model per backend model');
-    for (const slug of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    for (const slug of ['gpt-5.7-sol', 'gpt-5.6-terra', 'gpt-5.7-luna']) {
       const resolvedModel = rollbackModels.find((candidate) => candidate.info.id === `codex::${slug}`);
       const contextSize = resolvedModel?.info.configurationSchema?.properties?.contextSize;
       if (!resolvedModel || !contextSize) {
@@ -931,17 +931,17 @@ async function runModelCatalogMetadataSmokeTest() {
     );
 
     const duplicateGpt56Models = buildProviderModels(chatGptConfig, [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol First', { context_window: 272000, max_context_window: 872000 }),
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol Second', { context_window: 272000, max_context_window: 872000 })
+      createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol First', { context_window: 272000, max_context_window: 872000 }),
+      createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol Second', { context_window: 272000, max_context_window: 872000 })
     ], 'codexAccessToken');
     assertEqual(
       duplicateGpt56Models.map((model) => model.info.id).join(','),
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'duplicate GPT-5.6 rows yield one model ID'
     );
     assertEqual(
       duplicateGpt56Models.map((model) => model.info.name).join(','),
-      'GPT-5.6-Sol First',
+      'GPT-5.7-Sol First',
       'duplicate GPT-5.6 rows preserve first-seen metadata and order'
     );
 
@@ -955,13 +955,13 @@ async function runModelCatalogMetadataSmokeTest() {
 
     const apiKeyModels = buildProviderModels(chatGptConfig, rollbackCatalog, 'openaiApiKey');
     assertEqual(
-      apiKeyModels.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+      apiKeyModels.find((model) => model.requestModel === 'gpt-5.7-sol')?.info.maxInputTokens,
       828400,
       'API-key catalog uses a valid discovered maximum'
     );
     const customBackendModels = buildProviderModels(config, rollbackCatalog, 'codexAccessToken');
     assertEqual(
-      customBackendModels.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+      customBackendModels.find((model) => model.requestModel === 'gpt-5.7-sol')?.info.maxInputTokens,
       828400,
       'custom backend catalog uses a valid discovered maximum'
     );
@@ -974,14 +974,14 @@ async function runModelCatalogMetadataSmokeTest() {
     ]) {
       const models = buildProviderModels({ ...chatGptConfig, baseURL }, rollbackCatalog, 'codexAccessToken');
       assertEqual(
-        models.find((model) => model.requestModel === 'gpt-5.6-sol')?.info.maxInputTokens,
+        models.find((model) => model.requestModel === 'gpt-5.7-sol')?.info.maxInputTokens,
         828400,
         `backend ${baseURL} uses the valid discovered maximum`
       );
     }
 
     const promotedModels = buildProviderModels(chatGptConfig, [
-      createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { context_window: 372000, max_context_window: 372000 })
+      createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', { context_window: 372000, max_context_window: 372000 })
     ], 'codexAccessToken');
     const promotedModel = promotedModels[0];
     assertEqual(promotedModel.info.maxInputTokens, 353400, 'active 372K catalog value uses effective budget');
@@ -1001,7 +1001,7 @@ async function runModelCatalogMetadataSmokeTest() {
 
     const fallbackCeiling = buildFallbackModel({
       ...chatGptConfig,
-      model: 'gpt-5.6-sol'
+      model: 'gpt-5.7-sol'
     }, 'codexAccessToken');
     assertEqual(fallbackCeiling.info.maxInputTokens, 258400, 'fallback keeps conservative effective budget');
     assertEqual(
@@ -1400,7 +1400,7 @@ async function runProviderFallbackSmokeTest() {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
-          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { multi_agent_version: 'v2' }),
+          createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', { multi_agent_version: 'v2' }),
           createMockModel('gpt-5.6-nova', 'GPT-5.6-Nova', { multi_agent_version: 'v2' })
         ]
       }));
@@ -1521,7 +1521,7 @@ async function runProviderFallbackSmokeTest() {
     assertEqual(selectedModels.join(','), 'gpt-5.6-nova', 'selected model does not silently change');
     assertEqual(
       refreshedModels.map((item) => item.id).join(','),
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'failed refresh retains the authoritative catalog without the rejected model'
     );
     assertEqual(warnings.some((entry) => entry.message === 'response model unavailable'), true, 'unavailable warning emitted');
@@ -1550,7 +1550,7 @@ async function runInterleavedResponsePresentationSmokeTest() {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
-        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', {
           context_window: 272000,
           max_context_window: 1000000
         })]
@@ -1638,7 +1638,7 @@ async function runInterleavedResponsePresentationSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected sol model for interleaved response presentation test.');
     }
@@ -1712,7 +1712,7 @@ async function runStatefulMarkerRoundTripSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
     const chunks = [];
@@ -1748,7 +1748,7 @@ async function runStatefulMarkerRoundTripSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for official stateful marker coverage.');
     }
@@ -1783,7 +1783,7 @@ async function runStatefulMarkerRoundTripSmokeTest() {
       },
       {
         label: 'model-mismatched marker',
-        messages: createAgentHostContinuationMessages(createStatefulMarkerPart('codex::gpt-5.6-luna\\resp_marker_seed'), 'Agent Host instructions', 'Wrong model delta')
+        messages: createAgentHostContinuationMessages(createStatefulMarkerPart('codex::gpt-5.7-luna\\resp_marker_seed'), 'Agent Host instructions', 'Wrong model delta')
       },
       {
         label: 'malformed marker',
@@ -1874,7 +1874,7 @@ async function runNonLeadingStatefulMarkerHistoryReuseSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -1911,7 +1911,7 @@ async function runNonLeadingStatefulMarkerHistoryReuseSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for non-leading stateful marker history reuse coverage.');
     }
@@ -1968,7 +1968,7 @@ async function runStatefulMarkerContinuationRecoverySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -2025,7 +2025,7 @@ async function runStatefulMarkerContinuationRecoverySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for official stateful marker recovery coverage.');
     }
@@ -2090,7 +2090,7 @@ async function runStatefulMarkerToolOutputReplaySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -2144,7 +2144,7 @@ async function runStatefulMarkerToolOutputReplaySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for stateful marker tool-output replay coverage.');
     }
@@ -2211,7 +2211,7 @@ async function runStatefulMarkerMalformedRawSnapshotSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
     const chunks = [];
@@ -2264,7 +2264,7 @@ async function runStatefulMarkerMalformedRawSnapshotSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for malformed marker snapshot coverage.');
     }
@@ -2315,7 +2315,7 @@ async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() 
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
     if (request.method === 'GET') {
@@ -2386,7 +2386,7 @@ async function runStatefulMarkerAutoFallbackOpaqueToolOutputRecoverySmokeTest() 
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for auto-fallback opaque tool-output recovery coverage.');
     }
@@ -2508,7 +2508,7 @@ async function runStatefulMarkerOpaqueRecoverySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -2549,7 +2549,7 @@ async function runStatefulMarkerOpaqueRecoverySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for opaque stateful marker recovery coverage.');
     }
@@ -2594,7 +2594,7 @@ async function runStatefulMarkerRecordFailureSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -2623,7 +2623,7 @@ async function runStatefulMarkerRecordFailureSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for stateful marker record-failure coverage.');
     }
@@ -2658,7 +2658,7 @@ async function runStatefulMarkerInvalidCompletionIdSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -2700,7 +2700,7 @@ async function runStatefulMarkerInvalidCompletionIdSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for invalid completion-id coverage.');
     }
@@ -2745,7 +2745,7 @@ async function runHttpContinuationRecoverySmokeTest({ unsupported = false, rejec
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -2796,7 +2796,7 @@ async function runHttpContinuationRecoverySmokeTest({ unsupported = false, rejec
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected sol model for HTTP continuation recovery test.');
     }
@@ -2891,7 +2891,7 @@ async function runAutoTransportHttpContinuationRecoverySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -3022,7 +3022,7 @@ async function runAutoTransportHttpContinuationRecoverySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for auto transport HTTP continuation recovery coverage.');
     }
@@ -3188,7 +3188,7 @@ async function runStructuredHttpContinuationRecoverySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -3269,7 +3269,7 @@ async function runStructuredHttpContinuationRecoverySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected sol model for structured continuation recovery test.');
     }
@@ -3335,7 +3335,7 @@ async function runContinuationMissAfterVisibleOutputSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -3427,7 +3427,7 @@ async function runContinuationMissAfterVisibleOutputSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected sol model for visible continuation failure test.');
     }
@@ -3521,7 +3521,7 @@ async function runRequestEnvelopeReuseInvalidationSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -3567,7 +3567,7 @@ async function runRequestEnvelopeReuseInvalidationSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected sol model for request envelope reuse test.');
     }
@@ -3615,7 +3615,7 @@ async function runToolOutputFullInputReplaySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -3666,7 +3666,7 @@ async function runToolOutputFullInputReplaySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected sol model for tool output full-input replay test.');
     }
@@ -3714,7 +3714,7 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -3812,7 +3812,7 @@ async function runModelGeneratedToolLoopFullReplaySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for generated tool-loop coverage.');
     }
@@ -3883,7 +3883,7 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -4039,12 +4039,12 @@ async function runNativeHostedCanonicalReplaySmokeTest() {
     const token = createCancellationToken();
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+      [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', {
         context_window: 272000,
         max_context_window: 1000000
       })],
       'codexAccessToken'
-    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    ).find((item) => item.info.id === 'codex::gpt-5.7-sol')?.info;
     if (!model) {
       throw new Error('Expected model for native canonical replay coverage.');
     }
@@ -4189,7 +4189,7 @@ async function runNativeHostedCrossThreadBudgetDowngradeSmokeTest() {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
-        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', {
           context_window: 272000,
           max_context_window: 1000000
         })]
@@ -4294,12 +4294,12 @@ async function runNativeHostedCrossThreadBudgetDowngradeSmokeTest() {
     const token = createCancellationToken();
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+      [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', {
         context_window: 272000,
         max_context_window: 1000000
       })],
       'codexAccessToken'
-    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    ).find((item) => item.info.id === 'codex::gpt-5.7-sol')?.info;
     if (!model) {
       throw new Error('Expected model for cross-thread budget downgrade coverage.');
     }
@@ -4381,7 +4381,7 @@ async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -4579,9 +4579,9 @@ async function runNativeAutoFallbackRawStateIsolationSmokeTest() {
     const token = createCancellationToken();
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')],
+      [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')],
       'codexAccessToken'
-    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    ).find((item) => item.info.id === 'codex::gpt-5.7-sol')?.info;
     if (!model) {
       throw new Error('Expected model for auto fallback raw-state isolation coverage.');
     }
@@ -4695,7 +4695,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
-        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+        models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', {
           context_window: 272000,
           max_context_window: 1000000
         })]
@@ -4899,12 +4899,12 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
   try {
     const model = buildProviderModels(
       configValues,
-      [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', {
+      [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', {
         context_window: 272000,
         max_context_window: 1000000
       })],
       'codexAccessToken'
-    ).find((item) => item.info.id === 'codex::gpt-5.6-sol')?.info;
+    ).find((item) => item.info.id === 'codex::gpt-5.7-sol')?.info;
     if (!model) {
       throw new Error('Expected model for native WebSocket replay coverage.');
     }
@@ -5157,7 +5157,7 @@ async function runDanglingCompletedToolCallFullReplaySmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -5244,7 +5244,7 @@ async function runDanglingCompletedToolCallFullReplaySmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for dangling completed tool-call coverage.');
     }
@@ -5295,7 +5295,7 @@ async function runCreatedResponseCancellationDoesNotRecordBranchSmokeTest() {
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -5358,7 +5358,7 @@ async function runCreatedResponseCancellationDoesNotRecordBranchSmokeTest() {
   try {
     const discoveryToken = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, discoveryToken);
-    const model = models.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = models.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected model for created-response cancellation coverage.');
     }
@@ -5404,8 +5404,8 @@ async function runProviderCatalogVersionNeutralSmokeTest() {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
-          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { multi_agent_version: 'v2' }),
-          createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna', { multi_agent_version: 'v1' })
+          createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', { multi_agent_version: 'v2' }),
+          createMockModel('gpt-5.7-luna', 'GPT-5.7-Luna', { multi_agent_version: 'v1' })
         ]
       }));
       return;
@@ -5452,7 +5452,7 @@ async function runProviderCatalogVersionNeutralSmokeTest() {
   try {
     const token = createCancellationToken();
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.6-sol,codex::gpt-5.6-luna', 'multi-agent version does not affect discovery visibility');
+    assertEqual(models.map((model) => model.id).join(','), 'codex::gpt-5.7-sol,codex::gpt-5.7-luna', 'multi-agent version does not affect discovery visibility');
   } finally {
     globalThis.fetch = originalFetch;
     await closeServer(server);
@@ -5579,7 +5579,7 @@ async function runProviderStreamRateLimitIsolationSmokeTest() {
     description: 'Hosted Web Search selection marker',
     inputSchema: { type: 'object', properties: {} }
   };
-  const model = buildFallbackModel({ ...configValues, model: 'gpt-5.6-sol' }, 'openaiApiKey').info;
+  const model = buildFallbackModel({ ...configValues, model: 'gpt-5.7-sol' }, 'openaiApiKey').info;
 
   try {
     const token = createCancellationToken();
@@ -5679,7 +5679,7 @@ async function runProviderAccountKeyPinningSmokeTest() {
     }
     if (kind === 'models') {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
     if (kind === 'tokens') {
@@ -5737,7 +5737,7 @@ async function runProviderAccountKeyPinningSmokeTest() {
     const token = createCancellationToken();
     activeAccountKey = accountKey;
     const models = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.6-sol');
+    const model = models.find((candidate) => candidate.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected account-pinning model discovery result.');
     }
@@ -5788,8 +5788,8 @@ async function runProviderUnavailableScopeSmokeTest() {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         models: [
-          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol'),
-          createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna')
+          createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol'),
+          createMockModel('gpt-5.7-luna', 'GPT-5.7-Luna')
         ]
       }));
       return;
@@ -5803,11 +5803,11 @@ async function runProviderUnavailableScopeSmokeTest() {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     requestedModels.push(`${configValues.transport}:${body.model}`);
 
-    if (body.model === 'gpt-5.6-luna') {
+    if (body.model === 'gpt-5.7-luna') {
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         error: {
-          message: 'Model not found gpt-5.6-luna',
+          message: 'Model not found gpt-5.7-luna',
           type: 'invalid_request_error',
           param: 'model',
           code: null
@@ -5844,7 +5844,7 @@ async function runProviderUnavailableScopeSmokeTest() {
   try {
     const token = createCancellationToken();
     const initialModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const lunaModel = initialModels.find((item) => item.id === 'codex::gpt-5.6-luna');
+    const lunaModel = initialModels.find((item) => item.id === 'codex::gpt-5.7-luna');
     if (!lunaModel) {
       throw new Error('Expected luna model to be discoverable before scoped unavailability check.');
     }
@@ -5862,12 +5862,12 @@ async function runProviderUnavailableScopeSmokeTest() {
     }
 
     const httpModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    assertEqual(httpModels.some((item) => item.id === 'codex::gpt-5.6-luna'), false, 'same transport hides temporarily unavailable model');
+    assertEqual(httpModels.some((item) => item.id === 'codex::gpt-5.7-luna'), false, 'same transport hides temporarily unavailable model');
 
     configValues.transport = 'websocket';
     const websocketModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    assertEqual(websocketModels.some((item) => item.id === 'codex::gpt-5.6-luna'), true, 'temporarily unavailable cache is scoped by transport');
-    assertEqual(requestedModels.join(','), 'http:gpt-5.6-luna', 'scoped unavailability test issues only one failing request');
+    assertEqual(websocketModels.some((item) => item.id === 'codex::gpt-5.7-luna'), true, 'temporarily unavailable cache is scoped by transport');
+    assertEqual(requestedModels.join(','), 'http:gpt-5.7-luna', 'scoped unavailability test issues only one failing request');
   } finally {
     configValues.transport = 'http';
     await closeServer(server);
@@ -6158,7 +6158,9 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
             context_window: 272000,
             max_context_window: 1000000
           }),
-          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol', { multi_agent_version: 'v2' })
+          createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol', { multi_agent_version: 'v2' }),
+          createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol'),
+          createMockModel('gpt-5.6-luna', 'GPT-5.6-Luna')
         ]
       }));
       return;
@@ -6207,14 +6209,32 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
 
   try {
     const token = createCancellationToken();
+    for (const slug of ['gpt-5.6-luna', 'gpt-5.6-sol']) {
+      for (const suffix of ['', '::reasoning=high']) {
+        let blockedError;
+        try {
+          await provider.provideLanguageModelChatResponse(
+            { id: `codex::${slug}${suffix}`, name: slug, maxInputTokens: 1000, maxOutputTokens: 1000 },
+            [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Blocked model')] }],
+            {},
+            { report() {} },
+            token
+          );
+        } catch (error) {
+          blockedError = error;
+        }
+        assertEqual(blockedError?.message.includes(`"${slug}" is disabled`), true, 'blocked stale model rejects locally');
+      }
+    }
+    assertEqual(responseRequests.length, 0, 'blocked models never send Responses requests');
     const disabledModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(
       disabledModels.map((model) => model.id).join(','),
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'disabling a real slug filters both standard and long profiles'
     );
 
-    configValues.disabledModels = ['gpt-5.4', 'gpt-5.6-sol'];
+    configValues.disabledModels = ['gpt-5.4', 'gpt-5.7-sol'];
     const allDisabledModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(allDisabledModels.length, 0, 'disabling every discovered slug returns an empty picker catalog');
 
@@ -6244,11 +6264,11 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
     assertEqual(requestedModels.length, 0, 'all-disabled stale selection never reaches Responses');
 
     configValues.disabledModels = [];
-    configValues.modelAliases = { 'gpt-5.4': 'gpt-5.6-sol' };
+    configValues.modelAliases = { 'gpt-5.4': 'gpt-5.7-sol' };
     const aliasedModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(
       aliasedModels.map((model) => model.id).join(','),
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'aliasing a real slug filters both standard and long source profiles'
     );
 
@@ -6266,11 +6286,11 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
       token
     );
 
-    assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'stale profile suffix is never sent and alias applies to the real slug');
-    assertEqual(selectedModels.join(','), 'gpt-5.6-sol', 'profile alias updates selected model to the real slug');
+    assertEqual(requestedModels.join(','), 'gpt-5.7-sol', 'stale profile suffix is never sent and alias applies to the real slug');
+    assertEqual(selectedModels.join(','), 'gpt-5.7-sol', 'profile alias updates selected model to the real slug');
     assertEqual(requestedReasoningEfforts.join(','), 'high', 'profile alias preserves parsed reasoning effort');
 
-    const aliasTargetModel = aliasedModels.find((model) => model.id === 'codex::gpt-5.6-sol');
+    const aliasTargetModel = aliasedModels.find((model) => model.id === 'codex::gpt-5.7-sol');
     if (!aliasTargetModel) {
       throw new Error('Expected the alias target model in the filtered catalog.');
     }
@@ -6285,8 +6305,8 @@ async function runProviderModelDiscoveryPolicySmokeTest() {
       { report() {} },
       token
     );
-    assertEqual(requestedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target handles the follow-up request');
-    assertEqual(selectedModels.join(','), 'gpt-5.6-sol,gpt-5.6-sol', 'alias target remains selected for follow-up');
+    assertEqual(requestedModels.join(','), 'gpt-5.7-sol,gpt-5.7-sol', 'alias target handles the follow-up request');
+    assertEqual(selectedModels.join(','), 'gpt-5.7-sol,gpt-5.7-sol', 'alias target remains selected for follow-up');
     assertEqual(
       responseRequests[1].previous_response_id,
       'resp_alias',
@@ -6562,11 +6582,11 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
     assertEqual(allFilteredTokenCount, 2, 'all-filtered token count uses the local estimate');
     assertEqual(tokenCountRequestCount, 0, 'all-filtered token count skips the official endpoint');
 
-    catalog = [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')];
+    catalog = [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')];
     configValues.disabledModels = [];
     configValues.clientVersion = 'non-empty-test';
     const nonEmptyModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    assertEqual(nonEmptyModels.map((model) => model.id).join(','), 'codex::gpt-5.6-sol', 'non-empty authoritative catalog');
+    assertEqual(nonEmptyModels.map((model) => model.id).join(','), 'codex::gpt-5.7-sol', 'non-empty authoritative catalog');
 
     let missingModelMessage = '';
     try {
@@ -6593,8 +6613,8 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
 
     const prefixStaleModel = {
       ...staleModel,
-      id: 'codex::gpt-5.6-sol-preview',
-      family: 'gpt-5.6-sol-preview'
+      id: 'codex::gpt-5.7-sol-preview',
+      family: 'gpt-5.7-sol-preview'
     };
     let prefixModelMessage = '';
     try {
@@ -6610,7 +6630,7 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
     }
     assertEqual(
       prefixModelMessage,
-      'Selected Codex model "gpt-5.6-sol-preview" is not available in the authoritative model catalog.',
+      'Selected Codex model "gpt-5.7-sol-preview" is not available in the authoritative model catalog.',
       'authoritative catalog rejects implicit prefix remapping'
     );
     assertEqual(responseRequestCount, 0, 'prefix-like stale model never reaches Responses');
@@ -6665,7 +6685,7 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
     const postCancellationModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(
       postCancellationModels.map((model) => model.id).join(','),
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'canceled discovery does not cache a synthetic fallback catalog'
     );
 
@@ -6689,7 +6709,7 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
       concurrentResults[1].status === 'fulfilled'
         ? concurrentResults[1].value.map((model) => model.id).join(',')
         : '',
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'uncanceled discovery follower receives the shared catalog'
     );
 
@@ -6699,7 +6719,7 @@ async function runProviderAuthoritativeCatalogSmokeTest() {
     const postConcurrentCancellationModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
     assertEqual(
       postConcurrentCancellationModels.map((model) => model.id).join(','),
-      'codex::gpt-5.6-sol',
+      'codex::gpt-5.7-sol',
       'independent cancellation leaves the shared catalog cached'
     );
 
@@ -6781,7 +6801,7 @@ async function runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest() {
       modelRequestCount += 1;
       if (modelRequestCount === 1) {
         return new Response(JSON.stringify({
-          models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')]
+          models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')]
         }), {
           status: 200,
           headers: { 'content-type': 'application/json' }
@@ -6791,7 +6811,7 @@ async function runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest() {
       resolveRefreshStarted();
       await backgroundRefresh;
       return new Response(JSON.stringify({
-        models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')]
+        models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')]
       }), {
         status: 200,
         headers: { 'content-type': 'application/json' }
@@ -6820,14 +6840,14 @@ async function runProviderStaleModelRefreshDoesNotBlockResponseSmokeTest() {
   try {
     const token = createCancellationToken();
     const initialModels = await provider.provideLanguageModelChatInformation({ silent: true }, token);
-    const model = initialModels.find((item) => item.id === 'codex::gpt-5.6-sol');
+    const model = initialModels.find((item) => item.id === 'codex::gpt-5.7-sol');
     if (!model) {
       throw new Error('Expected a discovered model for stale-cache coverage.');
     }
 
     now += 10 * 60 * 1000 + 1;
     const response = provider.provideLanguageModelChatResponse(
-      { ...model, id: 'gpt-5.6-sol' },
+      { ...model, id: 'gpt-5.7-sol' },
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue without waiting for /models.')] }],
       {},
       { report() {} },
@@ -6870,7 +6890,7 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
       resolveModelRequestStarted();
       await modelResponse;
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ models: [createMockModel('gpt-5.6-sol', 'GPT-5.6-Sol')] }));
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
       return;
     }
 
@@ -6888,7 +6908,7 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
   const address = server.address();
   configValues.baseURL = `http://127.0.0.1:${address.port}/backend-api/codex/responses`;
   configValues.transport = 'http';
-  configValues.modelAliases = { 'gpt-5.6-luna': 'gpt-5.6-sol' };
+  configValues.modelAliases = { 'gpt-5.7-luna': 'gpt-5.7-sol' };
   const latencySnapshots = [];
   const provider = new CodexModelProvider(
     {
@@ -6921,7 +6941,7 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
     const performanceValues = [100, 110, 116, 125, 130, 131];
     performanceNow = () => performanceValues.shift() ?? 132;
     responsePromise = provider.provideLanguageModelChatResponse(
-      { id: 'codex::gpt-5.6-luna', name: 'GPT-5.6-Luna', family: 'gpt-5.6-luna', version: 'mock', maxInputTokens: 372000 },
+      { id: 'codex::gpt-5.7-luna', name: 'GPT-5.7-Luna', family: 'gpt-5.7-luna', version: 'mock', maxInputTokens: 372000 },
       [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new vscodeMock.LanguageModelTextPart('Continue from the selected model.')] }],
       {},
       { report() {} },
@@ -6935,7 +6955,7 @@ async function runProviderModelIdDoesNotBlockColdDiscoverySmokeTest() {
     assertEqual(firstRequest, 'response', 'provider model id bypasses cold model discovery');
     assertEqual(modelRequestCount, 0, 'provider model id does not request /models before Responses');
     assertEqual(responseRequestCount, 1, 'provider model id reaches Responses');
-    assertEqual(requestedModels.join(','), 'gpt-5.6-sol', 'provider model id applies configured alias directly');
+    assertEqual(requestedModels.join(','), 'gpt-5.7-sol', 'provider model id applies configured alias directly');
     await responsePromise;
     assertEqual(latencySnapshots.length, 1, 'provider emits one latency snapshot');
     assertEqual(latencySnapshots[0].context.requestBuildMs, 25, 'provider request build timing starts after message conversion');
@@ -6981,9 +7001,9 @@ async function runLocalTokenEstimateDiagnosticSmokeTest() {
     }
   );
   const model = {
-    id: 'codex::gpt-5.6-luna',
+    id: 'codex::gpt-5.7-luna',
     name: 'GPT-5.6 Luna',
-    family: 'gpt-5.6-luna',
+    family: 'gpt-5.7-luna',
     version: 'mock',
     maxInputTokens: 258400
   };
@@ -7073,7 +7093,7 @@ async function runProviderLimitErrorSmokeTest() {
       let error;
       try {
         await provider.provideLanguageModelChatResponse(
-          { id: 'codex::gpt-5.6-sol', name: 'Codex', family: 'gpt-5.6-sol', version: 'mock', maxInputTokens: 258400 },
+          { id: 'codex::gpt-5.7-sol', name: 'Codex', family: 'gpt-5.7-sol', version: 'mock', maxInputTokens: 258400 },
           [{ role: 1, content: [new LanguageModelTextPart('Continue work.')] }], {},
           { report(part) { parts.push(part); } }, createCancellationToken()
         );

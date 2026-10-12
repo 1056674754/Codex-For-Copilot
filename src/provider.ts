@@ -15,6 +15,7 @@ import {
 } from './convertMessages';
 import { ResponsesQuotaExceededError, ResponsesRateLimitedError, toChatLimitError } from './responsesLimitError';
 import { getProviderConfig, type ProviderConfig } from './config';
+
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ResolvedProviderModel } from './models';
 import {
   resolveReasoningEffort,
@@ -103,6 +104,14 @@ type ModelAliasResolution =
 type VSCodeWithThinkingPart = typeof vscode & {
   LanguageModelThinkingPart?: new (value: string | string[], id?: string, metadata?: { readonly [key: string]: any }) => unknown;
 };
+
+const BLOCKED_MODEL_SLUGS = new Set(['gpt-5.6-luna', 'gpt-5.6-sol']);
+
+function assertModelNotBlocked(model: string): void {
+  if (BLOCKED_MODEL_SLUGS.has(model)) {
+    throw new Error(`Codex model "${model}" is disabled. Select GPT-6 Luna or GPT-6 Sol from the model picker.`);
+  }
+}
 
 const USAGE_DATA_PART_MIME = 'usage';
 const MODEL_DISCOVERY_FALLBACK_TTL_MS = 60_000;
@@ -1885,11 +1894,12 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     availableModels: readonly ResolvedProviderModel[],
     authoritative = false
   ): ResolvedRequestModel {
+    const parsedModel = parseModelIdentifier(modelId || config.model);
+    assertModelNotBlocked(parsedModel.requestModel);
     if (availableModels.length === 0) {
       throw new Error('No Codex models are available after applying the configured discovery policy.');
     }
 
-    const parsedModel = parseModelIdentifier(modelId || config.model);
     const exactAvailableModel = modelId
       ? availableModels.find((candidate) => candidate.info.id === modelId)
       : undefined;
@@ -1984,6 +1994,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     const requestedModel = parseModelIdentifier(model.id);
+    assertModelNotBlocked(requestedModel.requestModel);
     const aliasResolution = resolveModelAliasTarget(requestedModel.requestModel, config.modelAliases);
     if (aliasResolution.kind === 'cycle') {
       throw new Error(`Model alias cycle detected for "${requestedModel.requestModel}".`);
@@ -1992,6 +2003,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     const resolvedModel = alias
       ? { ...requestedModel, requestModel: alias }
       : requestedModel;
+    assertModelNotBlocked(resolvedModel.requestModel);
     const unavailableModels = new Set([
       ...config.disabledModels,
       ...this.runtimeAvailability.getTemporarilyUnavailableModels(config, authIdentity)
@@ -2013,6 +2025,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
 
   private applyModelDiscoveryPolicy(models: ResolvedProviderModel[], config: ProviderConfig, authIdentity: string): ResolvedProviderModel[] {
     const disabledModels = new Set([
+      ...BLOCKED_MODEL_SLUGS,
       ...config.disabledModels,
       ...this.runtimeAvailability.getTemporarilyUnavailableModels(config, authIdentity)
     ]);
