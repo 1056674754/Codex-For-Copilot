@@ -52,6 +52,8 @@ import {
   type WebSearchSource
 } from './hostedTools/hostedToolEvents';
 
+import { classifyResponsesLimit, ResponsesQuotaExceededError, ResponsesRateLimitedError } from './responsesLimitError';
+
 const OPENAI_DEFAULT_MAX_RETRIES = 15;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const REUSABLE_WEBSOCKET_TTL_MS = 10 * 60 * 1000;
@@ -306,7 +308,7 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
         await streamResponseTextOnce(trackedOptions, abortController);
         return;
       } catch (error) {
-        if (!(error instanceof ResponsesStreamRateLimitError)
+        if (!(error instanceof ResponsesRateLimitedError)
           || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
           || visibleActivity
           || options.hasProviderVisibleOutput?.() === true) {
@@ -378,7 +380,7 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       }
     }
 
-    if (error instanceof ResponsesStreamRateLimitError) {
+    if (error instanceof ResponsesRateLimitedError || error instanceof ResponsesQuotaExceededError) {
       options.onResponseFailed?.(error.message);
     }
     if (error instanceof ResponsesStreamOverloadError) {
@@ -1011,7 +1013,19 @@ function createOpenAIClient(
     apiKey: options.apiKey,
     baseURL: normalizeBaseURL(options.baseURL),
     ...(defaultHeaders ? { defaultHeaders } : {}),
-    fetch: customFetch,
+    fetch: async (input, init) => {
+      const response = await customFetch(input, init);
+      // The SDK retries HTTP 429 by default. Quota exhaustion cannot recover on retry.
+      if (response.status === 429) {
+        const payload = await response.clone().json().catch(() => undefined) as { error?: unknown } | undefined;
+        if (classifyResponsesLimit(payload?.error ?? payload) === 'quota') {
+          const headers = new Headers(response.headers);
+          headers.set('x-should-retry', 'false');
+          return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+        }
+      }
+      return response;
+    },
     maxRetries: options.maxRetries ?? OPENAI_DEFAULT_MAX_RETRIES,
     timeout: OPENAI_DEFAULT_TIMEOUT_MS
   });
@@ -1405,8 +1419,14 @@ function handleResponsesServerEvent(
   }
 
   if (event.type === 'error') {
-    const message = collectErrorMessages(event).find((value) => value.trim())
-      ?? 'Responses API stream error.';
+    const message = collectErrorMessages(event).find((value) => value.trim()) ?? 'Responses API stream error.';
+    const limit = classifyResponsesLimit('error' in event ? event.error : event);
+    if (limit === 'quota') {
+      throw new ResponsesQuotaExceededError(message);
+    }
+    if (limit === 'rate') {
+      throw new ResponsesRateLimitedError(message, parseRetryDelayMs(message));
+    }
     options.onResponseFailed?.(message);
     throw new Error(message);
   }
@@ -1435,10 +1455,14 @@ function handleResponsesServerEvent(
       );
     }
 
-    if (error?.code === 'rate_limit_exceeded') {
-      throw new ResponsesStreamRateLimitError(
-        error.message ?? 'Responses API rate limit exceeded.',
-        parseRetryDelayMs(error.message)
+    if (classifyResponsesLimit(error) === 'quota') {
+      throw new ResponsesQuotaExceededError(error?.message ?? 'Responses API usage limit reached.');
+    }
+
+    if (classifyResponsesLimit(error) === 'rate') {
+      throw new ResponsesRateLimitedError(
+        error?.message ?? 'Responses API rate limit exceeded.',
+        parseRetryDelayMs(error?.message)
       );
     }
 
@@ -1593,13 +1617,6 @@ class ResponsesContinuationMissError extends Error {
   ) {
     super(message, options);
     this.name = 'ResponsesContinuationMissError';
-  }
-}
-
-class ResponsesStreamRateLimitError extends Error {
-  constructor(message: string, readonly retryDelayMs?: number) {
-    super(message);
-    this.name = 'ResponsesStreamRateLimitError';
   }
 }
 
@@ -1809,11 +1826,23 @@ function isFunctionCallContinuationIntegrityError(error: unknown): boolean {
 export function normalizeResponsesError(error: unknown, baseURL: string): Error {
   const endpoint = `${normalizeBaseURL(baseURL)}/responses`;
 
-  if (error instanceof ResponsesStreamRateLimitError) {
-    return new Error(
-      `OpenAI rate limit exceeded while contacting ${endpoint}. ${error.message}`,
-      { cause: error }
-    );
+  if (error instanceof ResponsesQuotaExceededError || error instanceof ResponsesRateLimitedError) {
+    return error;
+  }
+  let limit: 'quota' | 'rate' | undefined;
+  walkErrorEnvelope(error, (value) => {
+    const kind = classifyResponsesLimit(value);
+    if (kind === 'quota' || (kind === 'rate' && !limit)) {
+      limit = kind;
+    }
+    return true;
+  });
+  const message = error instanceof Error ? error.message : String(error);
+  if (limit === 'quota') {
+    return new ResponsesQuotaExceededError(message, { cause: error });
+  }
+  if (limit === 'rate' || error instanceof RateLimitError) {
+    return new ResponsesRateLimitedError(message, undefined, { cause: error });
   }
 
   if (error instanceof ResponsesStreamOverloadError) {
@@ -1845,13 +1874,6 @@ export function normalizeResponsesError(error: unknown, baseURL: string): Error 
     );
   }
 
-  if (error instanceof RateLimitError) {
-    return new Error(
-      `OpenAI rate limit exceeded while contacting ${endpoint}.${formatRequestId(error)} ${error.message}`.trim(),
-      { cause: error }
-    );
-  }
-
   if (error instanceof InternalServerError) {
     return new Error(
       `OpenAI server error while contacting ${endpoint}.${formatStatusAndRequestId(error)} ${error.message}`.trim(),
@@ -1865,8 +1887,6 @@ export function normalizeResponsesError(error: unknown, baseURL: string): Error 
       { cause: error }
     );
   }
-
-  const message = error instanceof Error ? error.message : String(error);
 
   if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) {
     return new Error(
