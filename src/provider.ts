@@ -438,6 +438,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     });
     let requestOptions: CodexRequestEnvelopeOptions = {
       compatibilityEnabled: compatibilityProfile.enabled,
+      enablePromptCacheKey: config.enablePromptCacheKey,
       model: selectedModel.requestModel,
       instructions: combineRequestInstructions(config.instructions, convertedMessages.systemInstructions),
       tools: selectedClientTools,
@@ -906,6 +907,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         accountKey: credentials.accountKey,
         transport: config.transport,
         compatibilityProfile,
+        enablePromptCacheKey: requestOptions.enablePromptCacheKey,
         identity: requestIdentity,
         turnState: branchState.turn.stickyState,
         authIdentity,
@@ -1502,6 +1504,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       transport: config.transport,
       websocketPrewarm: config.websocketPrewarm,
       requestCompression: config.requestCompression,
+      enablePromptCacheKey: config.enablePromptCacheKey,
       protocol: config.protocol
     });
     if (this.lastConnectionConfigurationKey && this.lastConnectionConfigurationKey !== key) {
