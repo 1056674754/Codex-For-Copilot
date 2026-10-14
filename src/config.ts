@@ -32,6 +32,7 @@ export interface ProviderConfig {
   maxRetries: number;
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
+  enablePromptCacheKey: boolean;
   protocol: CodexProtocolSettings;
   requestIdentity: RequestIdentitySettings;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
@@ -60,6 +61,7 @@ export function getProviderConfig(): ProviderConfig {
     maxRetries: normalizeMaxRetries(config.get('maxRetries', 15)),
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
+    enablePromptCacheKey: config.get('enablePromptCacheKey', false),
     protocol: {
       profile: normalizeProtocolProfile(config.get('protocolProfile', 'auto')),
       headerOverrides: normalizeStringRecord(config.get('headerOverrides', {}), 32, 1024),

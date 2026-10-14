@@ -35,6 +35,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const {
+  countInputTokens,
+  UnsupportedTokenCountEndpointError,
   createResponsesServerEventHandler,
   disposeReusableResponsesWebSockets,
   isResponsesContinuationMissError,
@@ -48,6 +50,7 @@ try {
   await runManagedWebSocketPrewarmContinuationMissSmokeTest(streamResponseText);
   await runManagedWebSocketPrewarmContinuationMissAfterVisibleOutputSmokeTest(streamResponseText);
   await runHttpRequestRateLimitRetrySmokeTest(streamResponseText);
+  await runInputTokenCountStatusSmokeTest(countInputTokens, UnsupportedTokenCountEndpointError);
   runHostedWebSearchEventSmokeTest(createResponsesServerEventHandler);
   await runNestedConnectionCauseSmokeTest(streamResponseText);
   await runLimitClassificationSmokeTest(streamResponseText);
@@ -84,6 +87,52 @@ try {
   disposeReusableResponsesWebSockets();
   Module._load = moduleLoad;
   await rm(tempDir, { recursive: true, force: true });
+}
+
+async function runInputTokenCountStatusSmokeTest(countInputTokens, UnsupportedTokenCountEndpointError) {
+  let status = 404;
+  let requests = 0;
+  const server = createServer(async (request, response) => {
+    requests += 1;
+    for await (const _chunk of request) {
+      // Consume the request body.
+    }
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(status === 200 ? JSON.stringify({ input_tokens: 37 }) : JSON.stringify({ error: 'unavailable' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    for (const testedStatus of [404, 405, 501, 503, 200]) {
+      status = testedStatus;
+      let count;
+      let error;
+      try {
+        count = await countInputTokens({
+          baseURL: `http://127.0.0.1:${server.address().port}/v1/responses`,
+          apiKey: 'test-api-key',
+          model: 'gpt-test',
+          input: 'Count these tokens.',
+          token: createCancellationToken()
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      const unsupported = [404, 405, 501].includes(status);
+      assertEqual(error instanceof UnsupportedTokenCountEndpointError, unsupported, `HTTP ${status} unsupported endpoint classification`);
+      if (unsupported) {
+        assertEqual(error.status, status, `HTTP ${status} preserves status`);
+      } else if (status === 503) {
+        assertEqual(error instanceof Error, true, 'temporary server error remains retryable');
+      } else {
+        assertEqual(error, undefined, 'supported token count succeeds');
+        assertEqual(count, 37, 'supported endpoint returns official count');
+      }
+    }
+    assertEqual(requests, 5, 'all token-count statuses are tested');
+  } finally {
+    server.close();
+  }
 }
 
 function runHostedWebSearchEventSmokeTest(createEventHandler) {
@@ -1478,6 +1527,14 @@ async function runWebSocketContinuationSmokeTest(streamResponseText) {
       headers: createHeaders(),
       transport: 'websocket',
       previousResponseId: 'resp_previous',
+      enablePromptCacheKey: true,
+      identity: {
+        installationId: '11111111-1111-4111-8111-111111111111',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        threadId: '33333333-3333-4333-8333-333333333333',
+        turnId: '44444444-4444-4444-8444-444444444444',
+        windowId: '55555555-5555-4555-8555-555555555555'
+      },
       omitMaxOutputTokens: true,
       model: 'gpt-5.5',
       instructions: 'Smoke test instructions',
@@ -1489,6 +1546,8 @@ async function runWebSocketContinuationSmokeTest(streamResponseText) {
 
     assertEqual(capturedClientEvent.type, 'response.create', 'continuation client event type');
     assertEqual(capturedClientEvent.previous_response_id, 'resp_previous', 'continuation previous response id');
+    assertEqual(capturedClientEvent.prompt_cache_key, '33333333-3333-4333-8333-333333333333', 'proxy WS sends opt-in thread cache key');
+    assertEqual('client_metadata' in capturedClientEvent, false, 'proxy cache key does not enable Codex metadata');
     assertEqual(JSON.stringify(capturedClientEvent.input), JSON.stringify([{ role: 'user', content: 'Only the delta' }]), 'continuation delta input');
     assertEqual(deltas.join(''), 'continued', 'continuation streamed text');
   } finally {
@@ -1750,6 +1809,7 @@ async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
   let connectionCount = 0;
   const receivedEvents = [];
   const sessionEvents = [];
+  const continuationMetrics = [];
   const server = createServer();
   const webSocketServer = new WebSocketServer({ noServer: true });
 
@@ -1810,13 +1870,15 @@ async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
       headers: createHeaders(),
       transport: 'websocket',
       previousResponseId: 'resp_ws_reuse_1',
+      allowToolOutputContinuation: true,
       omitMaxOutputTokens: true,
       model: 'gpt-5.5',
       instructions: 'Smoke test instructions',
-      input: [{ role: 'user', content: 'Second turn delta' }],
+      input: [{ type: 'function_call_output', call_id: 'call_ws_reuse', output: 'tool result' }],
       maxOutputTokens: 32,
       token: createCancellationToken(),
       onTextDelta: (text) => secondDeltas.push(text),
+      onTransportMetrics: (metrics) => continuationMetrics.push(metrics),
       onWebSocketSession: (event) => {
         sessionEvents.push(event);
       }
@@ -1826,6 +1888,12 @@ async function runWebSocketSequentialReuseSmokeTest(streamResponseText) {
     assertEqual(connectionCount, 1, 'sequential reuse connection count');
     assertEqual(receivedEvents.length, 2, 'sequential reuse message count');
     assertEqual(receivedEvents[1].previous_response_id, 'resp_ws_reuse_1', 'sequential reuse previous response id');
+    assertEqual(receivedEvents[1].input[0].type, 'function_call_output', 'sequential tool continuation sends only tool result');
+    assertEqual(
+      continuationMetrics.some((metrics) => metrics.previousResponseIdUsed === true && metrics.incrementalInputCount === 1),
+      true,
+      'generic WebSocket reports tool-output continuation before successful completion'
+    );
     assertEqual(firstDeltas.join(''), 'first', 'sequential reuse first output');
     assertEqual(secondDeltas.join(''), ' second', 'sequential reuse second output');
     assertEqual(sessionEvents.length, 2, 'sequential reuse session event count');

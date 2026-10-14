@@ -113,6 +113,13 @@ export interface ReasoningStreamLifecycleEvent {
   textLength?: number;
 }
 
+export class UnsupportedTokenCountEndpointError extends Error {
+  constructor(readonly status: number) {
+    super(`Responses input token counting endpoint is unavailable (HTTP ${status}).`);
+    this.name = 'UnsupportedTokenCountEndpointError';
+  }
+}
+
 export interface CountInputTokensOptions {
   baseURL: string;
   apiKey: string;
@@ -132,6 +139,7 @@ export interface StreamResponseTextOptions {
   accountKey?: string;
   transport?: 'auto' | 'http' | 'websocket';
   compatibilityProfile?: CodexCompatibilityProfile;
+  enablePromptCacheKey?: boolean;
   identity?: CodexRequestIdentity;
   turnState?: string;
   authIdentity?: string;
@@ -522,7 +530,14 @@ async function streamResponseTextOverWebSocket(
     // Register the SDK error listener before sending on a reused open socket.
     // The backend can reject a bad previous_response_id immediately.
     const stream = socket.stream();
-    socket.send(buildResponsesCreateEvent(options));
+    const requestEvent = buildResponsesCreateEvent(options);
+    socket.send(requestEvent);
+    // Match the managed WebSocket path: report the ID actually sent on the wire.
+    // The provider uses this after a successful response to judge tool continuation.
+    options.onTransportMetrics?.({
+      previousResponseIdUsed: Boolean(requestEvent.previous_response_id),
+      incrementalInputCount: Array.isArray(requestEvent.input) ? requestEvent.input.length : 0
+    });
 
     for await (const streamEvent of stream) {
       if (options.token.isCancellationRequested) {
@@ -1045,6 +1060,7 @@ function buildResponsesCreateEvent(options: StreamResponseTextOptions): Response
 function createRequestBuilderOptions(options: StreamResponseTextOptions): CodexRequestBuilderOptions {
   return {
     compatibilityEnabled: options.compatibilityProfile?.enabled ?? false,
+    enablePromptCacheKey: options.enablePromptCacheKey,
     identity: options.identity,
     model: options.model,
     instructions: options.instructions,
@@ -1757,6 +1773,10 @@ export async function countInputTokens(options: CountInputTokensOptions): Promis
       });
 
   if (!response.ok) {
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new UnsupportedTokenCountEndpointError(response.status);
+    }
     const body = await safeReadResponseBody(response);
     throw new Error(`Responses input token count failed with ${response.status} ${response.statusText}.${body ? ` ${body}` : ''}`);
   }
