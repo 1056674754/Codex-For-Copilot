@@ -41,11 +41,16 @@ const {
   disposeReusableResponsesWebSockets,
   isResponsesContinuationMissError,
   isResponsesContinuationMissPayload,
+  normalizeResponsesError,
   shouldBypassProxy,
   streamResponseText
 } = require(bundlePath);
 
 try {
+  for (const message of ['Our servers are currently overloaded. Please try again later.', 'OpenAI request failed. Our servers are currently overloaded.']) {
+    assertEqual(normalizeResponsesError(new Error(message), 'https://example.test/responses').name, 'ResponsesOverloadedError', 'generic overload envelope preserves classification');
+  }
+  assertEqual(normalizeResponsesError(new Error('Ordinary request failure.'), 'https://example.test/responses').name, 'Error', 'ordinary failure is not overload');
   runContinuationMissClassifierSmokeTest(isResponsesContinuationMissPayload);
   await runManagedWebSocketPrewarmContinuationMissSmokeTest(streamResponseText);
   await runManagedWebSocketPrewarmContinuationMissAfterVisibleOutputSmokeTest(streamResponseText);
@@ -57,6 +62,7 @@ try {
   await runHttpTransportSmokeTest(streamResponseText);
   await runHttpStreamRateLimitRetrySmokeTest(streamResponseText);
   await runHttpStreamRateLimitAfterOutputSmokeTest(streamResponseText);
+  await runStructuredOverloadRetrySmokeTest(streamResponseText);
   await runHttpStatusOverloadRetrySmokeTest(streamResponseText);
   await runHttpStreamOverloadRetrySmokeTest(streamResponseText);
   await runHttpGenericServerFailureRetrySmokeTest(streamResponseText);
@@ -441,10 +447,10 @@ async function runHttpStatusOverloadRetrySmokeTest(streamResponseText) {
     });
 
     assertEqual(requestCount, 16, 'HTTP status overload uses the default 15-retry budget');
-    assertEqual(retryDelays.length, 15, 'HTTP status overload waits before all 15 retries');
+    assertEqual(JSON.stringify(retryDelays), JSON.stringify([10_000, 20_000, 40_000, 80_000, ...Array(11).fill(120_000)]), 'HTTP 5xx uses exponential backoff capped at two minutes');
     assertEqual(retryDelays.every((delay) => delay >= 10_000), true, 'HTTP status overload waits at least 10 seconds per retry');
     assertEqual(
-      retryReasons.filter((reason) => reason === 'http_server_overloaded').length,
+      retryReasons.filter((reason) => reason === 'stream_server_overloaded').length,
       15,
       'HTTP status overload reports each protected retry'
     );
@@ -457,7 +463,7 @@ async function withImmediateLongRetryTimers(run) {
   const originalSetTimeout = globalThis.setTimeout;
   const retryDelays = [];
   globalThis.setTimeout = (callback, delay, ...args) => {
-    if (Number(delay) >= 10_000 && Number(delay) <= 60_000) {
+    if (Number(delay) >= 10_000 && Number(delay) <= 120_000) {
       retryDelays.push(Number(delay));
       return originalSetTimeout(callback, 0, ...args);
     }
@@ -498,7 +504,7 @@ async function runHttpStreamOverloadAfterOutputSmokeTest(streamResponseText) {
     }
 
     assertEqual(requestCount, 1, 'HTTP overload after visible output is not retried');
-    assertEqual(capturedError?.message.includes('remained overloaded'), true, 'HTTP overload surfaces after visible output');
+    assertEqual(capturedError?.name, 'ResponsesOverloadedError', 'HTTP overload remains typed after visible output');
     assertEqual(failures.length, 1, 'unsafe HTTP overload is reported as terminal');
   } finally {
     server.close();
@@ -2824,5 +2830,46 @@ async function runLimitClassificationSmokeTest(streamResponseText) {
     assertEqual(httpRequests + wsRequests, unknown ? 3 : 1, `${mode} quota never retries; unknown 429 keeps SDK retry budget`);
     assertEqual(completed, 0, `${mode} never completes`);
     if (mode === 'auto-quota') assertEqual(httpRequests, 0, 'structured quota never falls back to HTTP');
+  }
+}
+
+async function runStructuredOverloadRetrySmokeTest(streamResponseText) {
+  for (const transport of ['http', 'websocket', 'auto']) {
+    let httpRequests = 0;
+    let wsRequests = 0;
+    const message = 'Our servers are currently overloaded. Please try again later.';
+    const server = createServer((_request, response) => {
+      httpRequests += 1;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end('data: ' + JSON.stringify({ type: 'error', code: 'server_overloaded', message }) + '\n\n');
+    });
+    const sockets = new WebSocketServer({ server });
+    sockets.on('connection', socket => socket.on('message', () => {
+      wsRequests += 1;
+      socket.send(JSON.stringify({ type: 'error', error: { code: 'server_overloaded', message } }));
+    }));
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const metrics = [];
+    let error;
+    try {
+      const delays = await withImmediateLongRetryTimers(async () => {
+        try {
+          await streamResponseText({
+            ...createStreamOptions('http://127.0.0.1:' + server.address().port + '/backend-api/codex/responses', transport),
+            maxRetries: 2,
+            onTransportMetrics(metric) { if (metric.retryAttempt) metrics.push(metric); }
+          });
+        } catch (caught) { error = caught; }
+      });
+      assertEqual(error?.name, 'ResponsesOverloadedError', transport + ' structured overload stays typed');
+      assertEqual(httpRequests + wsRequests, 3, transport + ' structured overload uses exact bounded budget');
+      assertEqual(JSON.stringify(metrics.map(m => m.retryDelayMs)), JSON.stringify([10000, 20000]), transport + ' structured overload backs off');
+      assertEqual(JSON.stringify(metrics.map(m => m.retryAttempt)), JSON.stringify([1, 2]), transport + ' retry attempts are observable');
+      if (transport !== 'http') assertEqual(httpRequests, 0, 'structured WebSocket overload never falls back to HTTP');
+    } finally {
+      for (const socket of sockets.clients) socket.terminate();
+      sockets.close();
+      server.close();
+    }
   }
 }

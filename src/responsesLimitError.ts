@@ -13,6 +13,13 @@ export class ResponsesRateLimitedError extends Error {
   }
 }
 
+export class ResponsesOverloadedError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ResponsesOverloadedError';
+  }
+}
+
 export function classifyResponsesLimit(payload: unknown): 'quota' | 'rate' | undefined {
   if (!payload || typeof payload !== 'object') {
     return undefined;
@@ -37,12 +44,15 @@ export function classifyResponsesLimit(payload: unknown): 'quota' | 'rate' | und
  * which appends the stack (including its duplicate message) whenever it is present.
  * Log the original error before converting it; do not forward its cause or stack.
  */
-export function toChatLimitError(error: ResponsesQuotaExceededError | ResponsesRateLimitedError): Error {
+export function toChatLimitError(error: ResponsesQuotaExceededError | ResponsesRateLimitedError | ResponsesOverloadedError): Error {
   const quota = error instanceof ResponsesQuotaExceededError;
+  const overloaded = error instanceof ResponsesOverloadedError;
   const retryHint = getRetryHint(error.message);
   const message = quota
     ? `Codex usage limit reached. ${retryHint ?? 'Try again after your usage resets'}, or switch accounts.`
-    : `Codex is temporarily rate limited. ${retryHint ?? 'Try again shortly'}.`;
+    : overloaded
+      ? `Codex servers are temporarily overloaded. ${retryHint ?? 'Try again shortly'}.`
+      : `Codex is temporarily rate limited. ${retryHint ?? 'Try again shortly'}.`;
   const result = new Error(message);
   result.name = quota ? 'ChatQuotaExceeded' : 'ChatRateLimited';
   result.stack = undefined;

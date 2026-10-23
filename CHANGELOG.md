@@ -2,6 +2,32 @@
 
 This changelog is maintained by Release Please from Conventional Commit titles merged into `master`.
 
+## 1.9.8-local.4 (local fork)
+
+- Prevent concurrent account-bound requests from globally closing each other's WebSocket sessions with the close reason `OK`; preserve account/token-scoped connection isolation.
+- Correlate selected model/account bindings and all provider failures in request diagnostics.
+- Document the current stable-API and Agent Host limits on native account grouping.
+
+## 1.9.8-local.3 (local fork)
+
+- Add editable account short names through Rename Account, stored by stable account reference without email matching; preserve model IDs and full identity tooltips.
+
+- Recover Agent Host continuation snapshots across provider instances and window reloads using opt-in private, bounded local storage.
+- Save snapshots atomically before emitting markers; when persistence is disabled or unavailable, retain client-side history instead of issuing an unrecoverable marker.
+- Preserve account, endpoint, request-envelope and tool integrity checks. Add cross-process, concurrent-write, expiry, capacity, privacy and provider-instance regression coverage.
+- Document Copilot utility override syntax and main-agent fallback limitations.
+
+## 1.9.8-local.2 (local fork)
+
+- Bind each saved Codex account to separate, account-labelled model entries so Copilot SDK requests retain their selected account even when a shared Agent Host serves them through another window.
+- Pin HTTP requests, 401 recovery, WebSocket handshakes, and remote token counts to the model's account; fail closed when that account is unavailable rather than silently using CLI or default credentials.
+- Clarify that account-switch commands and compact usage show the workspace default, not the account selected in a bound chat model.
+
+## 1.9.8-local.1 (local fork)
+
+- Merge upstream v1.9.8, including WebSocket tool continuation, proxy cache affinity, and unsupported token-count endpoint fixes.
+- Preserve local model policy and reliability fixes, including bounded server-error retries with two-minute backoff and concise Copilot error reporting.
+
 ## [1.9.8](https://github.com/GaussianGuaicai/Codex-For-Copilot/compare/v1.9.7...v1.9.8) (2026-10-13)
 
 

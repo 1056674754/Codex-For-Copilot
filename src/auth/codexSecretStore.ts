@@ -6,7 +6,7 @@ import type { CodexAuthBundle, CodexCredentialRecord, LegacyCodexCredentialRecor
 
 /** Legacy single-account secret key retained purely for first-run migration. */
 export const CODEX_AUTH_SECRET_KEY = 'codexForCopilot.codexAuthBundle';
-const ACCOUNTS_INDEX_SECRET_KEY = 'codexForCopilot.codexAuthAccounts';
+export const ACCOUNTS_INDEX_SECRET_KEY = 'codexForCopilot.codexAuthAccounts';
 const ACTIVE_ACCOUNT_SECRET_KEY = 'codexForCopilot.codexActiveAccount';
 const ACCOUNT_SECRET_PREFIX = 'codexForCopilot.codexAuthAccount.';
 
@@ -16,9 +16,14 @@ interface AccountsIndex {
   activeAccountKey?: string;
 }
 
-/** Stores Codex credentials across multiple accounts plus a pointer to the active one. */
+const WORKSPACE_ACTIVE_ACCOUNT_KEY = 'codexForCopilot.activeAccountKey';
+
+/** Shares credentials while optionally keeping account selection local to a workspace. */
 export class CodexSecretStore {
-  constructor(private readonly secrets: vscode.SecretStorage) {}
+  constructor(
+    private readonly secrets: vscode.SecretStorage,
+    private readonly workspaceState?: Pick<vscode.Memento, 'get' | 'update'>
+  ) {}
 
   /** List every stored account key. Migration from the legacy single record is performed on first access. */
   async listAccountKeys(): Promise<string[]> {
@@ -26,26 +31,46 @@ export class CodexSecretStore {
     return (await this.readIndex()).accountKeys;
   }
 
-  /** The active account key, defaulting to the first stored account when unset. */
+  /** Seed a workspace from the legacy selection once; recover if its account was removed. */
   async getActiveAccountKey(): Promise<string | undefined> {
     await this.migrateLegacyIfNeeded();
     const index = await this.readIndex();
-    const requested = index.activeAccountKey;
+    const workspaceAccount = this.workspaceState?.get<string>(WORKSPACE_ACTIVE_ACCOUNT_KEY);
+    const requested = workspaceAccount ?? index.activeAccountKey;
+    let selected: string | undefined;
     if (requested && await this.hasCredential(requested)) {
-      return requested;
+      selected = requested;
+    } else {
+      for (const accountKey of index.accountKeys) {
+        if (await this.hasCredential(accountKey)) {
+          selected = accountKey;
+          break;
+        }
+      }
     }
-    const first = index.accountKeys[0];
-    if (first && first !== requested) {
-      await this.writeIndex({ accountKeys: index.accountKeys, activeAccountKey: first });
+    if (this.workspaceState) {
+      // Do not overwrite a switch that completed while credentials were being read.
+      if (workspaceAccount !== this.workspaceState.get<string>(WORKSPACE_ACTIVE_ACCOUNT_KEY)) {
+        return this.getActiveAccountKey();
+      }
+      if (selected !== workspaceAccount) {
+        await this.workspaceState.update(WORKSPACE_ACTIVE_ACCOUNT_KEY, selected);
+      }
+    } else if (selected !== index.activeAccountKey) {
+      await this.writeIndex({ accountKeys: index.accountKeys, activeAccountKey: selected });
     }
-    return first;
+    return selected;
   }
 
   async setActiveAccountKey(accountKey: string): Promise<void> {
     await this.migrateLegacyIfNeeded();
     if (!await this.hasCredential(accountKey)) throw new Error(`Unknown Codex account: ${accountKey}`);
-    const index = await this.readIndex();
-    await this.writeIndex({ accountKeys: index.accountKeys, activeAccountKey: accountKey });
+    if (this.workspaceState) {
+      await this.workspaceState.update(WORKSPACE_ACTIVE_ACCOUNT_KEY, accountKey);
+    } else {
+      const index = await this.readIndex();
+      await this.writeIndex({ accountKeys: index.accountKeys, activeAccountKey: accountKey });
+    }
   }
 
   // ------------------------------------------------------------------

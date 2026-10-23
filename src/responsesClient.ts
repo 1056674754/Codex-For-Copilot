@@ -52,7 +52,7 @@ import {
   type WebSearchSource
 } from './hostedTools/hostedToolEvents';
 
-import { classifyResponsesLimit, ResponsesQuotaExceededError, ResponsesRateLimitedError } from './responsesLimitError';
+import { classifyResponsesLimit, ResponsesOverloadedError, ResponsesQuotaExceededError, ResponsesRateLimitedError } from './responsesLimitError';
 
 const OPENAI_DEFAULT_MAX_RETRIES = 15;
 const OPENAI_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -315,7 +315,15 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
       try {
         await streamResponseTextOnce(trackedOptions, abortController);
         return;
-      } catch (error) {
+      } catch (caught) {
+        const error = caught instanceof ResponsesStreamOverloadError
+          ? caught
+          : isResponsesOverloadPayload(caught) || (caught instanceof APIError && caught.status !== undefined && caught.status >= 500 && caught.status <= 599)
+            ? new ResponsesStreamOverloadError(
+              caught instanceof Error ? caught.message : String(caught),
+              caught instanceof APIError ? parseRetryAfterHeadersMs(caught.headers ?? new Headers()) : undefined
+            )
+            : caught;
         if (!(error instanceof ResponsesRateLimitedError)
           || attempt >= STREAM_RATE_LIMIT_MAX_RETRIES
           || visibleActivity
@@ -326,9 +334,10 @@ export async function streamResponseText(options: StreamResponseTextOptions): Pr
             || options.hasProviderVisibleOutput?.() === true) {
             throw error;
           }
-          options.onTransportMetrics?.({ retryReason: 'stream_server_overloaded' });
+          const retryDelayMs = getOverloadRetryDelayMs(error.retryDelayMs, attempt);
+          options.onTransportMetrics?.({ retryReason: 'stream_server_overloaded', retryAttempt: attempt + 1, retryDelayMs });
           await waitForRetryDelay(
-            getOverloadRetryDelayMs(error.retryDelayMs),
+            retryDelayMs,
             abortController.signal
           );
           if (options.token.isCancellationRequested || abortController.signal.aborted) {
@@ -1030,6 +1039,12 @@ function createOpenAIClient(
     ...(defaultHeaders ? { defaultHeaders } : {}),
     fetch: async (input, init) => {
       const response = await customFetch(input, init);
+      // The outer loop owns 5xx retries so transport and stream failures share one budget.
+      if (response.status >= 500 && response.status <= 599) {
+        const headers = new Headers(response.headers);
+        headers.set('x-should-retry', 'false');
+        return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+      }
       // The SDK retries HTTP 429 by default. Quota exhaustion cannot recover on retry.
       if (response.status === 429) {
         const payload = await response.clone().json().catch(() => undefined) as { error?: unknown } | undefined;
@@ -1665,8 +1680,8 @@ function isResponsesOverloadPayload(error: unknown): boolean {
   return messageMatched || dedicatedCodeMatched;
 }
 
-function getOverloadRetryDelayMs(serverDelayMs?: number): number {
-  return Math.max(OVERLOAD_MIN_RETRY_DELAY_MS, serverDelayMs ?? 0);
+function getOverloadRetryDelayMs(serverDelayMs?: number, attempt = 0): number {
+  return Math.min(120_000, Math.max(OVERLOAD_MIN_RETRY_DELAY_MS * 2 ** Math.min(attempt, 4), serverDelayMs ?? 0));
 }
 
 function parseRetryAfterHeadersMs(headers: Headers): number | undefined {
@@ -1865,11 +1880,8 @@ export function normalizeResponsesError(error: unknown, baseURL: string): Error 
     return new ResponsesRateLimitedError(message, undefined, { cause: error });
   }
 
-  if (error instanceof ResponsesStreamOverloadError) {
-    return new Error(
-      `OpenAI servers remained overloaded while contacting ${endpoint} after bounded retries. ${error.message}`,
-      { cause: error }
-    );
+  if (error instanceof ResponsesStreamOverloadError || isResponsesOverloadPayload(error)) {
+    return new ResponsesOverloadedError(message, { cause: error });
   }
 
   if (error instanceof APIConnectionTimeoutError) {

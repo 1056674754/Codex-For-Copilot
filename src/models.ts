@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { parseAccountModelIdentifier } from './accountModels';
 import type { ProviderConfig } from './config';
 import type { ApiCredentials } from './secrets';
 import { normalizeBaseURL } from './responsesClient';
@@ -221,7 +222,7 @@ export function buildFallbackModel(config: ProviderConfig, credentialKind: ApiCr
 }
 
 export function parseModelIdentifier(modelId: string): ParsedModelIdentifier {
-  const normalizedModelId = stripProviderModelIdPrefix(modelId);
+  const normalizedModelId = stripProviderModelIdPrefix(parseAccountModelIdentifier(modelId).modelId);
   const delimiterIndex = normalizedModelId.indexOf(REASONING_ID_DELIMITER);
   const profiledModel = delimiterIndex < 0 ? normalizedModelId : normalizedModelId.slice(0, delimiterIndex);
   const contextDelimiterIndex = profiledModel.indexOf(CONTEXT_ID_DELIMITER);

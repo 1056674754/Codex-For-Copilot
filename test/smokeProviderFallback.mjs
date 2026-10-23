@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import Module from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { build } from 'esbuild';
 import WebSocket, * as webSocketModule from 'ws';
@@ -39,6 +40,7 @@ const configValues = {
   baseURL: '',
   clientVersion: '0.0.0',
   credentialsSource: 'secretStorage',
+  persistContinuationHistory: true,
   transport: 'http',
   model: 'gpt-5.5',
   includeHiddenModels: false,
@@ -209,8 +211,16 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return moduleLoad.call(this, request, parent, isMain);
 };
 
-const { CodexModelProvider, hasCanonicalReplayContinuationIntegrity } = require(bundlePath);
-const { buildFallbackModel, buildProviderModels, fetchAvailableModels } = require(modelsBundlePath);
+const { CodexModelProvider: Provider, hasCanonicalReplayContinuationIntegrity } = require(bundlePath);
+class CodexModelProvider extends Provider {
+  constructor(context, ...args) {
+    super({
+      globalStorageUri: { scheme: 'file', fsPath: mkdtempSync(join(tempDir, 'history-')) },
+      ...context
+    }, ...args);
+  }
+}
+const { buildFallbackModel, buildProviderModels, fetchAvailableModels, parseModelIdentifier } = require(modelsBundlePath);
 
 try {
   await runProviderLimitErrorSmokeTest();
@@ -225,7 +235,9 @@ try {
   await runInterleavedResponsePresentationSmokeTest();
   await runProviderStreamRateLimitIsolationSmokeTest();
   await runProviderAccountKeyPinningSmokeTest();
+  await runAccountBoundModelRoutingSmokeTest();
   await runStatefulMarkerRoundTripSmokeTest();
+  await runStatefulMarkerPersistencePolicySmokeTest();
   await runNonLeadingStatefulMarkerHistoryReuseSmokeTest();
   await runStatefulMarkerContinuationRecoverySmokeTest();
   await runStatefulMarkerOpaqueRecoverySmokeTest();
@@ -1708,7 +1720,8 @@ async function runStatefulMarkerRoundTripSmokeTest() {
   const replies = [
     ['seed reply', 'resp_marker_seed', 'msg_marker_seed'],
     ['second reply', 'resp_marker_second', 'msg_marker_second'],
-    ['third reply', 'resp_marker_third', 'msg_marker_third']
+    ['third reply', 'resp_marker_third', 'msg_marker_third'],
+    ['recovered reply', 'resp_marker_recovered', 'msg_marker_recovered']
   ];
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/backend-api/codex/models')) {
@@ -1775,10 +1788,6 @@ async function runStatefulMarkerRoundTripSmokeTest() {
 
     const invalidCases = [
       {
-        label: 'changed System instructions',
-        messages: createAgentHostContinuationMessages(seedMarkerPart, 'Changed Agent Host instructions', 'Changed instruction delta')
-      },
-      {
         label: 'forged unknown response id',
         messages: createAgentHostContinuationMessages(createStatefulMarkerPart(`${model.id}\\resp_forged`), 'Agent Host instructions', 'Forged delta')
       },
@@ -1811,8 +1820,12 @@ async function runStatefulMarkerRoundTripSmokeTest() {
       );
     }
 
+    const servingProvider = new CodexModelProvider(
+      { secrets: provider.context.secrets, subscriptions: [], globalStorageUri: provider.context.globalStorageUri },
+      createOutputChannel()
+    );
     const secondParts = [];
-    await provider.provideLanguageModelChatResponse(
+    await servingProvider.provideLanguageModelChatResponse(
       model,
       createAgentHostContinuationMessages(seedMarkerPart, 'Agent Host instructions', 'Second delta'),
       {},
@@ -1832,7 +1845,7 @@ async function runStatefulMarkerRoundTripSmokeTest() {
     const thirdMarkerPart = getSingleStatefulMarkerPart(thirdParts, 'third completion');
 
     assertEqual(responseRequests.length, 3, 'only valid official marker calls reach Responses');
-    assertEqual(responseRequests[1].previous_response_id, 'resp_marker_seed', 'second call selects exact local seed response');
+    assertEqual(responseRequests[1].previous_response_id, 'resp_marker_seed', 'a different provider instance restores the exact seed response from shared history');
     assertEqual(JSON.stringify(responseRequests[1].input), JSON.stringify([
       { role: 'user', content: 'Second delta', type: 'message' }
     ]), 'second call sends marker-free delta only');
@@ -1843,8 +1856,19 @@ async function runStatefulMarkerRoundTripSmokeTest() {
     assertEqual(decodeStatefulMarker(secondMarkerPart), `${model.id}\\resp_marker_second`, 'second marker uses official text encoding');
     assertEqual(decodeStatefulMarker(thirdMarkerPart), `${model.id}\\resp_marker_third`, 'third marker proves repeated accumulated continuation');
 
+    await provider.provideLanguageModelChatResponse(
+      model,
+      createAgentHostContinuationMessages(thirdMarkerPart, 'Changed Agent Host instructions', 'Changed instruction delta'),
+      {}, { report() {} }, token
+    );
+    assertEqual(responseRequests.length, 4, 'changed instructions recover from complete local history');
+    assertEqual(responseRequests[3].previous_response_id, undefined, 'envelope changes never reuse the server branch');
+    assertEqual(responseRequests[3].instructions, 'Smoke test instructions\n\nChanged Agent Host instructions', 'replay uses current instructions');
+    assertEqual(responseRequests[3].input.length, 7, 'replay retains all three requests, replies, and the new delta');
+    assertEqual(responseRequests[3].input[0].content, 'Initial input', 'replay retains the initial user input');
+
     const originalNow = Date.now;
-    Date.now = () => originalNow() + 10 * 60 * 1000 + 1;
+    Date.now = () => originalNow() + 7 * 24 * 60 * 60 * 1000 + 1;
     try {
       await assertLocalMarkerFailure(
         () => provider.provideLanguageModelChatResponse(
@@ -1855,13 +1879,59 @@ async function runStatefulMarkerRoundTripSmokeTest() {
           token
         ),
         responseRequests,
-        3,
+        4,
         'expired marker'
       );
     } finally {
       Date.now = originalNow;
     }
   } finally {
+    await closeServer(server);
+  }
+}
+
+async function runStatefulMarkerPersistencePolicySmokeTest() {
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ models: [createMockModel('gpt-5.7-sol', 'Fixture')] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) { chunks.push(chunk); }
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    writeSseResponseWithOutputItem(response, 'fixture reply', `resp_persist_${requests.length}`, `msg_persist_${requests.length}`);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const originalConfig = { ...configValues };
+  configValues.baseURL = `http://127.0.0.1:${server.address().port}/backend-api/codex/responses`;
+  configValues.transport = 'http';
+  try {
+    const context = { secrets: { async get() { return 'fixture-api-key'; } }, subscriptions: [] };
+    const provider = new CodexModelProvider(context, createOutputChannel());
+    const token = createCancellationToken();
+    const [model] = await provider.provideLanguageModelChatInformation({ silent: true }, token);
+    const seed = [{ role: vscodeMock.LanguageModelChatMessageRole.User, content: [new LanguageModelTextPart('private seed')] }];
+    const parts = [];
+    await provider.provideLanguageModelChatResponse(model, seed, {}, { report: (part) => parts.push(part) }, token);
+    const marker = getSingleStatefulMarkerPart(parts, 'durable seed');
+    const differentAccount = new CodexModelProvider({ ...context, secrets: { async get() { return 'different-api-key'; } }, globalStorageUri: provider.context.globalStorageUri }, createOutputChannel());
+    await assertLocalMarkerFailure(
+      () => differentAccount.provideLanguageModelChatResponse(model, createAgentHostContinuationMessages(marker, '', 'foreign delta'), {}, { report() {} }, token),
+      requests, 1, 'another credential cannot restore shared history'
+    );
+    configValues.persistContinuationHistory = false;
+    const disabledParts = [];
+    await provider.provideLanguageModelChatResponse(model, seed, {}, { report: (part) => disabledParts.push(part) }, token);
+    assertEqual(getStatefulMarkers(disabledParts).length, 0, 'default opt-out never discards the client history behind a marker');
+    configValues.persistContinuationHistory = true;
+    const unavailable = new CodexModelProvider({ ...context, globalStorageUri: undefined }, createOutputChannel());
+    const unavailableParts = [];
+    await unavailable.provideLanguageModelChatResponse(model, seed, {}, { report: (part) => unavailableParts.push(part) }, token);
+    assertEqual(getStatefulMarkers(unavailableParts).length, 0, 'unavailable shared storage suppresses markers without failing the completed response');
+  } finally {
+    Object.assign(configValues, originalConfig);
     await closeServer(server);
   }
 }
@@ -4689,7 +4759,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
   const sockets = new Set();
   const warnings = [];
   let httpResponseRequestCount = 0;
-  let connectionCount = 0;
+  const responseConnections = new Set();
   let selectedNamespace;
   let selectedTool;
   const server = createServer((request, response) => {
@@ -4714,11 +4784,11 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
     });
   });
   webSocketServer.on('connection', (webSocket) => {
-    connectionCount += 1;
     sockets.add(webSocket);
     webSocket.once('close', () => sockets.delete(webSocket));
     webSocket.on('message', (data) => {
       const frame = JSON.parse(data.toString('utf8'));
+      responseConnections.add(webSocket);
       frames.push(frame);
       if (frames.length === 1) {
         const namespaceTool = frame.tools.find((tool) => tool.type === 'namespace');
@@ -4972,7 +5042,7 @@ async function runNativeHostedToolOutputContinuationRecoverySmokeTest() {
       ]),
       'native WebSocket tool-result continuation sends only the incremental output'
     );
-    assertEqual(connectionCount, 1, 'native WebSocket tool-result continuation reuses the existing socket');
+    assertEqual(responseConnections.size, 1, 'native WebSocket tool-result continuation reuses the existing socket, excluding idle preconnections');
     assertEqual(frames[1].input.filter((item) => item.type === 'tool_search_output').length, 0, 'native WebSocket continuation excludes hidden Tool Search output');
     assertEqual(frames[1].input.filter((item) => item.type === 'function_call').length, 0, 'native WebSocket continuation excludes already acknowledged function calls');
     assertEqual(frames[1].input.filter((item) => item.type === 'function_call_output').length, 1, 'native WebSocket continuation includes one matching output');
@@ -5875,6 +5945,223 @@ async function runProviderUnavailableScopeSmokeTest() {
   }
 }
 
+async function runAccountBoundModelRoutingSmokeTest() {
+  const originalConfig = { ...configValues };
+  const requests = [];
+  const upgrades = [];
+  const sockets = new Set();
+  const contexts = [];
+  const accounts = [
+    { accountKey: 'local-owner-a', email: 'same@example.test', accountId: 'remote-workspace-a', source: 'extensionOAuth' },
+    { accountKey: 'local-owner-b', email: 'same@example.test', accountId: 'remote-workspace-b', source: 'extensionOAuth' }
+  ];
+  const reference = (key) => createHash('sha256').update(key).digest('hex').slice(0, 24);
+  let pendingSocketResponse;
+  let notifySocketPending;
+  let holdSocketResponse = false;
+  const recoveries = [];
+  let rotatedB = false;
+  let rejectNextResponse = false;
+  const snapshot = (account) => ({
+    accessToken: rotatedB && account.accountKey === 'local-owner-b' ? 'rotated-bound-b-token' : `token-${account.accountKey}`,
+    accountId: account.accountId,
+    accountKey: account.accountKey,
+    revision: 'bound-revision',
+    source: account.source,
+    refreshable: true
+  });
+  const snapshotReads = [];
+  const storedReads = [];
+  let rejectB = false;
+  let failModels = false;
+  const makeManager = (activeKey) => ({
+    async listAccounts() { return accounts.map((account) => ({ ...account, isActive: account.accountKey === activeKey })); },
+    async getActiveAccountKey() { return activeKey; },
+    async getCredentialSnapshot(key) {
+      snapshotReads.push(key);
+      const account = accounts.find((candidate) => candidate.accountKey === (key ?? activeKey));
+      if (!account || (rejectB && account.accountKey === 'local-owner-b')) throw new Error('Account requires reauthentication');
+      return snapshot(account);
+    },
+    async getStoredCredentialSnapshot(key) {
+      storedReads.push(key);
+      return snapshot(accounts.find((candidate) => candidate.accountKey === key));
+    },
+    async recoverFromUnauthorized(context) {
+      recoveries.push(context);
+      rotatedB = true;
+      return snapshot(accounts.find((account) => account.accountKey === context.accountKey));
+    }
+  });
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+    const kind = request.url.includes('/models') ? 'models' : request.url.endsWith('/input_tokens') ? 'tokens' : 'responses';
+    requests.push({ kind, body, authorization: request.headers.authorization, accountId: request.headers['chatgpt-account-id'] });
+    if (kind === 'models') {
+      response.writeHead(failModels ? 503 : 200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(failModels ? { error: 'catalog unavailable' } : { models: [createMockModel('gpt-5.7-sol', 'GPT-5.7-Sol')] }));
+    } else if (kind === 'tokens') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 17 }));
+    } else if (rejectNextResponse) {
+      rejectNextResponse = false;
+      response.writeHead(401);
+      response.end();
+    } else {
+      writeSseResponse(response, 'Bound account response.', `resp_bound_http_${requests.length}`);
+    }
+  });
+  const webSocketServer = new webSocketModule.WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    upgrades.push({ authorization: request.headers.authorization, accountId: request.headers['chatgpt-account-id'] });
+    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => webSocketServer.emit('connection', webSocket, request));
+  });
+  webSocketServer.on('connection', (socket, request) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.on('message', (data) => {
+      requests.push({ kind: 'websocket', body: JSON.parse(data.toString()), authorization: request.headers.authorization, accountId: request.headers['chatgpt-account-id'] });
+      const send = () => sendWebSocketTextResponse(socket, 'Bound socket response.', `resp_bound_ws_${requests.length}`, `msg_bound_${requests.length}`);
+      if (holdSocketResponse) {
+        holdSocketResponse = false;
+        pendingSocketResponse = send;
+        notifySocketPending();
+      } else {
+        send();
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  configValues.baseURL = `http://127.0.0.1:${server.address().port}/backend-api/codex/responses`;
+  configValues.credentialsSource = 'codexAuth';
+  configValues.transport = 'http';
+  configValues.websocketPrewarm = 'disabled';
+  const makeProvider = (manager) => {
+    const context = { subscriptions: [], secrets: { async get() { throw new Error('Bound models must not read an unrelated API key'); } } };
+    contexts.push(context);
+    return new CodexModelProvider(context, createOutputChannel(), undefined, undefined, undefined, manager);
+  };
+  const servingManager = makeManager('local-owner-a');
+  const originatingManager = makeManager('local-owner-b');
+  const servingProvider = makeProvider(servingManager);
+  const originatingProvider = makeProvider(originatingManager);
+  const token = createCancellationToken();
+  const prompt = [{ role: 1, content: [new LanguageModelTextPart('Use the selected account.')] }];
+  const invoke = (model) => servingProvider.provideLanguageModelChatResponse(model, prompt, {}, { report() {} }, token);
+  const assertRejectedWithoutNetwork = async (model, label) => {
+    const before = requests.length;
+    let error;
+    try { await invoke(model); } catch (caught) { error = caught; }
+    assertEqual(Boolean(error), true, label);
+    assertEqual(requests.length, before, `${label}: no network fallback`);
+  };
+
+  try {
+    const servingModels = await servingProvider.provideLanguageModelChatInformation({ silent: true }, token);
+    const originModels = await originatingProvider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(JSON.stringify(servingModels.map((model) => model.id)), JSON.stringify(originModels.map((model) => model.id)), 'all windows advertise identical account-bound IDs regardless of their active account');
+    assertEqual(snapshotReads.length, 0, 'enumerating account models never refreshes active or inactive credentials');
+    assertEqual(storedReads.length, 4, 'discovery reads stored snapshots of each account');
+    assertEqual(servingModels.length, 2, 'the model picker exposes one entry for each saved account');
+    const modelA = servingModels.find((model) => model.id.endsWith(reference('local-owner-a')));
+    const modelB = originModels.find((model) => model.id.endsWith(reference('local-owner-b')));
+    assertEqual(Boolean(modelA && modelB), true, 'both account-bound model entries are available');
+    assertEqual(modelB.name.includes('same@example.test'), true, 'model labels show the readable account email');
+    assertEqual(modelA.name === modelB.name, false, 'one email in different remote workspaces has distinct readable labels');
+    assertEqual(modelB.id.includes('local-owner-b'), false, 'model IDs do not expose raw local account keys');
+    assertEqual(modelB.id.includes('@'), false, 'model IDs do not expose email addresses');
+    assertEqual(parseModelIdentifier(modelB.id).requestModel, 'gpt-5.7-sol', 'account binding is not sent as part of the upstream model');
+    const profiledId = `codex::gpt-5.7-sol::context=950000::reasoning=high::account=${reference('local-owner-b')}`;
+    assertEqual(parseModelIdentifier(profiledId).requestModel, 'gpt-5.7-sol', 'bound legacy context IDs preserve model parsing');
+    assertEqual(parseModelIdentifier(profiledId).reasoningEffort, 'high', 'bound legacy reasoning IDs preserve effort parsing');
+    const catalogRequests = requests.filter((request) => request.kind === 'models');
+    assertEqual(catalogRequests.some((request) => request.authorization === 'Bearer token-local-owner-a' && request.accountId === 'remote-workspace-a'), true, 'account A discovery uses A credentials');
+    assertEqual(catalogRequests.some((request) => request.authorization === 'Bearer token-local-owner-b' && request.accountId === 'remote-workspace-b'), true, 'account B discovery uses B credentials');
+
+    requests.length = 0;
+    snapshotReads.length = 0;
+    await invoke(modelB);
+    assertEqual(requests.filter((request) => request.kind === 'responses')[0].authorization, 'Bearer token-local-owner-b', 'window A serves window B model with B authorization');
+    assertEqual(requests.find((request) => request.kind === 'responses').accountId, 'remote-workspace-b', 'window A serves window B model with B workspace header');
+    assertEqual(requests.find((request) => request.kind === 'responses').body.model, 'gpt-5.7-sol', 'wire request contains only the upstream slug');
+    assertEqual(await servingManager.getActiveAccountKey(), 'local-owner-a', 'serving B never switches the serving window default away from A');
+    assertEqual(snapshotReads.every((key) => key === 'local-owner-b'), true, 'HTTP refresh and request snapshots are explicitly pinned to B');
+    assertEqual(await servingProvider.provideTokenCount(modelB, 'Bound token count', token), 17, 'token counting succeeds with the bound model');
+    assertEqual(requests.find((request) => request.kind === 'tokens').authorization, 'Bearer token-local-owner-b', 'token counting uses B rather than serving-window A');
+
+    for (const transport of ['http', 'websocket', 'auto']) {
+      configValues.transport = transport;
+      for (const model of [modelA, modelB, modelA]) {
+        const before = requests.length;
+        await invoke(model);
+        const sent = requests.slice(before).find((request) => request.kind === 'responses' || request.kind === 'websocket');
+        const key = model === modelA ? 'local-owner-a' : 'local-owner-b';
+        assertEqual(sent.authorization, `Bearer token-${key}`, `${transport} account switches always use the model-bound token`);
+        assertEqual(sent.accountId, model === modelA ? 'remote-workspace-a' : 'remote-workspace-b', `${transport} account switches preserve the model-bound workspace`);
+        assertEqual(sent.body.previous_response_id, undefined, `${transport} switching accounts cannot inherit another account response`);
+      }
+    }
+    configValues.transport = 'websocket';
+    const socketPending = new Promise((resolve) => { notifySocketPending = resolve; });
+    holdSocketResponse = true;
+    const concurrentA = invoke(modelA);
+    const settledA = concurrentA.then(() => undefined, (error) => error);
+    await socketPending;
+    await invoke(modelB);
+    pendingSocketResponse();
+    const concurrentError = await settledA;
+    assertEqual(concurrentError?.message, undefined, 'concurrent B account must not close account A active socket with OK');
+    const originalBWorkspace = accounts[1].accountId;
+    accounts[1].accountId = accounts[0].accountId;
+    await invoke(modelB);
+    const sameWorkspaceRequest = requests.at(-1);
+    assertEqual(sameWorkspaceRequest.authorization, 'Bearer token-local-owner-b', 'different owners in one remote workspace still use the explicitly bound token');
+    assertEqual(sameWorkspaceRequest.accountId, accounts[0].accountId, 'same-workspace owner test preserves the selected workspace header');
+    accounts[1].accountId = originalBWorkspace;
+    assertEqual(upgrades.some((request) => request.authorization === 'Bearer token-local-owner-b'), true, 'WebSocket handshake uses account B credentials');
+    configValues.transport = 'http';
+    configValues.credentialsSource = 'secretStorage';
+    await invoke(modelB);
+    assertEqual(requests.at(-1).authorization, 'Bearer token-local-owner-b', 'an explicit account-bound model cannot be overridden by a default credential-source setting');
+    configValues.credentialsSource = 'codexAuth';
+    rejectNextResponse = true;
+    const before401 = requests.length;
+    await invoke(modelB);
+    const retryRequests = requests.slice(before401).filter((request) => request.kind === 'responses');
+    assertEqual(retryRequests.length, 2, 'a bound model retries its unauthorized request once');
+    assertEqual(retryRequests[0].authorization, 'Bearer token-local-owner-b', 'the initial unauthorized request uses B');
+    assertEqual(retryRequests[1].authorization, 'Bearer rotated-bound-b-token', '401 retry uses rotated B rather than default A');
+    assertEqual(recoveries[0].accountKey, 'local-owner-b', 'bound-account 401 recovery is pinned to B');
+    rejectB = true;
+    await assertRejectedWithoutNetwork(modelB, 'a rejected bound account fails rather than sending with A or CLI credentials');
+    rejectB = false;
+    const removed = accounts.pop();
+    await assertRejectedWithoutNetwork(modelB, 'a removed bound account fails rather than switching to the remaining account');
+    accounts.push(removed);
+    await assertRejectedWithoutNetwork({ ...modelB, id: `${modelA.id}::account=broken` }, 'malformed account binding fails closed');
+    await assertRejectedWithoutNetwork({ ...modelB, id: `codex::gpt-5.7-sol::account=${'0'.repeat(24)}` }, 'unknown account binding fails closed');
+
+    failModels = true;
+    const fallbackProvider = makeProvider(servingManager);
+    const fallbackModels = await fallbackProvider.provideLanguageModelChatInformation({ silent: true }, token);
+    assertEqual(fallbackModels.length, 2, 'catalog failures retain account-labelled fallback models for both accounts');
+    assertEqual(fallbackModels.every((model) => model.id.includes('::account=')), true, 'fallback models never lose their account binding');
+    failModels = false;
+    configValues.transport = 'http';
+    await invoke({ ...modelA, id: 'codex::gpt-5.7-sol' });
+    assertEqual(requests.filter((request) => request.kind === 'responses').at(-1).authorization, 'Bearer token-local-owner-a', 'legacy unbound IDs remain compatible with the serving-window default');
+  } finally {
+    for (const context of contexts) for (const subscription of context.subscriptions) subscription.dispose();
+    for (const socket of sockets) socket.terminate();
+    await closeWebSocketServer(webSocketServer);
+    await closeServer(server);
+    for (const key of Object.keys(configValues)) if (!(key in originalConfig)) delete configValues[key];
+    Object.assign(configValues, originalConfig);
+  }
+}
+
 function createCancellationToken() {
   return {
     isCancellationRequested: false,
@@ -6137,7 +6424,8 @@ async function assertLocalMarkerFailure(request, responseRequests, expectedReque
   } catch (error) {
     failureMessage = error instanceof Error ? error.message : String(error);
   }
-  assertEqual(failureMessage, 'Stateful continuation marker could not be resolved locally.', `${label} uses the fixed local error`);
+  assertEqual(failureMessage.startsWith('Stateful continuation marker could not be resolved locally. ['), true, `${label} includes a classified local failure`);
+  assertEqual(failureMessage.includes('resend the complete history'), true, `${label} explains safe recovery`);
   assertEqual(responseRequests.length, expectedRequestCount, `${label} sends zero backend requests`);
 }
 
@@ -7160,6 +7448,8 @@ async function runProviderLimitErrorSmokeTest() {
         expectedMessage: 'Codex is temporarily rate limited. Try again shortly.' },
       { code: 'usage_limit_reached', backendMessage: '429 {"error":{"message":"Usage limit reached. try again tomorrow."}}',
         expectedMessage: 'Codex usage limit reached. Try again tomorrow, or switch accounts.' },
+      { code: 'server_overloaded', backendMessage: 'Our servers are currently overloaded. Please try again later.',
+        expectedMessage: 'Codex servers are temporarily overloaded. Try again later.' },
       { code: 'invalid_request_error', backendMessage: 'Backend detail. Try again at 12:00.' }
     ]) {
       let requests = 0;
@@ -7194,9 +7484,9 @@ async function runProviderLimitErrorSmokeTest() {
       } finally {
         await closeServer(server);
       }
-      assertEqual(error?.name, code === 'usage_limit_reached' ? 'ChatQuotaExceeded' : code === 'rate_limit_exceeded' ? 'ChatRateLimited' : 'Error', 'provider native error classification');
+      assertEqual(error?.name, code === 'usage_limit_reached' ? 'ChatQuotaExceeded' : code === 'rate_limit_exceeded' || code === 'server_overloaded' ? 'ChatRateLimited' : 'Error', 'provider native error classification');
       assertEqual(requests, 1, 'visible partial response is never replayed');
-      assertEqual(refreshes, code === 'invalid_request_error' ? 0 : 1, 'limit failure refreshes usage once');
+      assertEqual(refreshes, code === 'invalid_request_error' || code === 'server_overloaded' ? 0 : 1, 'only account limits refresh usage once');
       assertEqual(parts.filter((part) => part instanceof LanguageModelTextPart).map((part) => part.value).join(''), 'Already visible.', 'partial text is preserved without fake completion text');
       assertEqual(getStatefulMarkers(parts).length, 0, 'failed turn does not generate a continuation marker');
       if (expectedMessage) {
@@ -7210,8 +7500,8 @@ async function runProviderLimitErrorSmokeTest() {
         // Copilot ExtChatEndpoint uses toErrorMessage(e, true): message + stack if present.
         const reason = received.stack ? `${received.message}: ${received.stack}` : received.message;
         assertEqual(reason, expectedMessage, 'verbose participant formatting stays concise after RPC');
-        assertEqual(logs.some((entry) => entry.message.includes('response limit reached')
-          && entry.message.includes(code === 'usage_limit_reached' ? 'ResponsesQuotaExceededError' : 'ResponsesRateLimitedError')), true, 'original limit diagnostics remain in provider logs');
+        assertEqual(logs.some((entry) => entry.message.includes(code === 'server_overloaded' ? 'response server overloaded' : 'response limit reached')
+          && entry.message.includes(code === 'usage_limit_reached' ? 'ResponsesQuotaExceededError' : code === 'server_overloaded' ? 'ResponsesOverloadedError' : 'ResponsesRateLimitedError')), true, 'original limit diagnostics remain in provider logs');
       } else {
         assertEqual(error.message.includes(backendMessage), true, 'ordinary failures retain backend details');
         assertEqual(typeof error.stack, 'string', 'ordinary failures retain their diagnostic stack');

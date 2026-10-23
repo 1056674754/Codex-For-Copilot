@@ -34,7 +34,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   ) {
     this.logger = logger instanceof CodexLogger ? logger : createCodexLogger(logger, 'account-usage');
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
-    this.statusBarItem.name = 'Codex Account Limits';
+    this.statusBarItem.name = 'Codex Account Limits (Workspace Default)';
     this.statusBarItem.command = 'codexModelProvider.showAccountLimits';
     this.statusBarItem.hide();
 
@@ -108,7 +108,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       if (entry.error || !entry.snapshot) {
         return {
           label: `${entry.isActive ? '$(check) ' : ''}${entry.label}`,
-          description: entry.isActive ? 'active' : '',
+          description: entry.isActive ? 'workspace default' : '',
           detail: 'Usage unavailable (failed to load)',
           accountKey: entry.accountKey
         };
@@ -116,7 +116,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       const display = buildCodexAccountUsageDisplay(entry.snapshot, this.selectedModel);
       return {
         label: `${entry.isActive ? '$(check) ' : ''}${entry.label}`,
-        description: [entry.isActive ? 'active' : '', display.compactText ?? ''].filter(Boolean).join('  '),
+        description: [entry.isActive ? 'workspace default' : '', display.compactText ?? ''].filter(Boolean).join('  '),
         detail: display.tooltip.replace(/\n/g, '  •  '),
         accountKey: entry.accountKey
       };
@@ -127,7 +127,7 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       [...items, { label: '', kind: vscode.QuickPickItemKind.Separator }, actions],
       {
         title: 'Codex Account Limits',
-        placeHolder: 'Select an account to set it active, or refresh all.'
+        placeHolder: 'Select a default for this workspace (chat model bindings are unchanged), or refresh all.'
       }
     );
 
@@ -145,8 +145,10 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
       const entry = this.usageByAccount.get(selected);
       if (entry && !entry.isActive) {
         await this.authManager.switchAccount(selected);
-        vscode.window.showInformationMessage(`Active Codex account switched to ${entry.label}.`);
-        // Switching fires onDidChangeAuth which triggers a refresh; render immediately too.
+        vscode.window.showInformationMessage(`Workspace default Codex account switched to ${entry.label}. For SDK chats, select an account-labelled model in Chat; existing model bindings are unchanged.`);
+        for (const account of this.usageByAccount.values()) {
+          account.isActive = account.accountKey === selected;
+        }
         this.renderActive();
       }
     }
@@ -160,7 +162,15 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
   private async refreshNow(): Promise<void> {
     const logger = this.logger.operation('account-usage.refresh');
     const config = getProviderConfig();
-    const activeCredentials = await getApiCredentials(this.context, this.authManager);
+    let activeCredentials: ApiCredentials | undefined;
+    try {
+      activeCredentials = await getApiCredentials(this.context, this.authManager);
+    } catch (error) {
+      this.usageByAccount.clear();
+      this.statusBarItem.hide();
+      logger.warn('refresh.credentials-unavailable', { error });
+      return;
+    }
 
     if (!activeCredentials || activeCredentials.kind !== 'codexAccessToken') {
       this.usageByAccount.clear();
@@ -239,9 +249,9 @@ export class CodexAccountUsageStatusBar implements vscode.Disposable {
     const accountCount = this.usageByAccount.size;
     const prefix = accountCount > 1 && this.showAccountName ? `$(organization) ${active.label} ` : '';
     this.statusBarItem.text = `${prefix}${display.compactText}`;
-    this.statusBarItem.tooltip = accountCount > 1
+    this.statusBarItem.tooltip = `${accountCount > 1
       ? `${display.tooltip}\n\n${accountCount} accounts — click to view all.`
-      : display.tooltip;
+      : display.tooltip}\n\nWorkspace default account. Chat uses the account in its selected model label.`;
     this.statusBarItem.show();
   }
 }

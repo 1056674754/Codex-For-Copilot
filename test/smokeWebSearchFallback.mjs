@@ -286,7 +286,7 @@ async function runBackendErrorSmokeTest() {
     assertEqual(rejection instanceof Error, true, 'backend failure rejects with an error');
     assertEqual(requestCount, 1, 'Web Search honors the configured zero retry budget');
     assertEqual(
-      rejection.message.includes('OpenAI server error while contacting'),
+      rejection.name === 'ResponsesOverloadedError' && rejection.message.includes('backend exploded'),
       true,
       'backend failure is normalized through the shared Responses error path'
     );

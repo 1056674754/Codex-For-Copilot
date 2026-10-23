@@ -6,6 +6,7 @@ failed.md
 .gitignore
 .vscode/**
 .vscode-test/**
+.venv/**
 AGENTS.md
 node_modules/**
 src/**

@@ -4,7 +4,8 @@ import { CodexModelProvider } from './provider';
 import { CodexAuthLock } from './auth/codexAuthLock';
 import { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexAuthenticationProvider, CODEX_AUTHENTICATION_PROVIDER_ID } from './auth/codexAuthenticationProvider';
-import { CodexSecretStore } from './auth/codexSecretStore';
+import { accountModelReference } from './accountModels';
+import { ACCOUNTS_INDEX_SECRET_KEY, CodexSecretStore } from './auth/codexSecretStore';
 import { InvalidAuthJsonError } from './auth/codexAuthTypes';
 import { createCodexLogger } from './codexLogger';
 import { getProviderConfig } from './config';
@@ -54,7 +55,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   void vscode.workspace.fs.createDirectory(context.globalStorageUri);
   const authManager = new CodexAuthManager(
-    new CodexSecretStore(context.secrets),
+    new CodexSecretStore(context.secrets, context.workspaceState),
     (accountKey) => new CodexAuthLock(vscode.Uri.joinPath(context.globalStorageUri, `codex-auth-refresh.${sanitizeLockKey(accountKey)}.lock`)),
     undefined,
     logger.child('auth')
@@ -63,6 +64,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const accountUsageStatusBar = new CodexAccountUsageStatusBar(context, logger.child('account-usage'), authManager);
   const provider = new CodexModelProvider(context, logger.child('provider'), undefined, accountUsageStatusBar, accountUsageStatusBar, authManager);
   const webSearchIdentityManager = new CodexIdentityManager(context.globalState);
+  let knownAccountKeys: string | undefined;
+  context.subscriptions.push(context.secrets.onDidChange(async (event) => {
+    if (event.key !== ACCOUNTS_INDEX_SECRET_KEY) {
+      return;
+    }
+    try {
+      const accountKeys = JSON.stringify((await authManager.listAccounts()).map((account) => account.accountKey));
+      if (accountKeys !== knownAccountKeys) {
+        knownAccountKeys = accountKeys;
+        provider.handleAuthenticationChanged();
+        void accountUsageStatusBar.refresh();
+      }
+    } catch (error) {
+      logger.child('auth').warn('accounts.shared-change.failed', { error });
+    }
+  }));
 
   context.subscriptions.push(authManager, authManager.onDidChangeAuth((event) => {
     logger.child('auth').info('auth.changed', { reason: event.reason, accountKey: event.accountKey });
@@ -202,18 +219,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand('workbench.action.openSettings', 'codexModelProvider.nativeToolSearch');
       }
     }),
+    vscode.commands.registerCommand('codexForCopilot.auth.renameAccount', async () => {
+      const picked = await pickAccount(authManager, 'Rename Codex Account', 'Choose the account whose display name you want to edit.');
+      if (!picked) return;
+      const config = vscode.workspace.getConfiguration('codexModelProvider');
+      const names = config.get<Record<string, string>>('accountDisplayNames', {});
+      const reference = accountModelReference(picked.accountKey);
+      const name = await vscode.window.showInputBox({
+        title: 'Codex Account Display Name',
+        prompt: 'Enter a short name. Leave empty to restore the original account label.',
+        value: names[reference] ?? '',
+        validateInput: (value) => value.trim().length > 40 ? 'Use at most 40 characters.' : undefined
+      });
+      if (name === undefined) return;
+      const updated = { ...names };
+      if (name.trim()) updated[reference] = name.trim();
+      else delete updated[reference];
+      await config.update('accountDisplayNames', updated, vscode.ConfigurationTarget.Global);
+    }),
     vscode.commands.registerCommand('codexForCopilot.auth.switchAccount', async () => {
-      const picked = await pickAccount(authManager, 'Switch Codex Account', 'Choose which account new chat requests use.');
+      const picked = await pickAccount(authManager, 'Switch Codex Account', 'Choose a workspace default. For SDK chats, select an account-labelled model in Chat.');
       if (!picked) return;
       await authManager.switchAccount(picked.accountKey);
       logger.child('command').info('auth.switched', { accountKey: picked.accountKey });
-      vscode.window.showInformationMessage(`Active Codex account switched to ${accountDisplayName(picked)}.`);
+      vscode.window.showInformationMessage(`Workspace default Codex account switched to ${accountDisplayName(picked)}. For SDK chats, select an account-labelled model in Chat; existing model bindings are unchanged.`);
     }),
     vscode.commands.registerCommand('codexForCopilot.auth.removeAccount', async () => {
       const picked = await pickAccount(authManager, 'Remove Codex Account', 'Choose an account to remove (its credentials will be deleted).');
       if (!picked) return;
       const label = accountDisplayName(picked);
-      const confirm = await vscode.window.showWarningMessage(`Remove Codex account ${label}?`, { modal: true }, 'Remove');
+      const confirm = await vscode.window.showWarningMessage(`Remove Codex account ${label} from all workspaces?`, { modal: true }, 'Remove');
       if (confirm !== 'Remove') return;
       await authManager.signOut(picked.accountKey);
       logger.child('command').info('auth.removed', { accountKey: picked.accountKey });
@@ -245,7 +280,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         await authManager.switchAccount(accountKey);
         const status = await authManager.getStatus(accountKey);
-        vscode.window.showInformationMessage(`Added Codex account${status.email ? ` ${status.email}` : ''} and set it active.`);
+        vscode.window.showInformationMessage(`Added Codex account${status.email ? ` ${status.email}` : ''} and set it as this workspace's default. For SDK chats, select its account-labelled model in Chat.`);
       } catch (error) {
         logger.child('command').error('auth.add-account.failed', error);
         const message = error instanceof InvalidAuthJsonError ? error.message : (error instanceof Error ? error.message : 'Adding a Codex account failed.');
@@ -360,7 +395,7 @@ async function pickAccount(
   }
   const items = accounts.map((account) => ({
     label: `${account.isActive ? '$(check) ' : ''}${accountDisplayName(account)}`,
-    description: [account.isActive ? 'Active' : undefined, credentialSourceLabel(account.source)].filter(Boolean).join(' · '),
+    description: [account.isActive ? 'Workspace default' : undefined, credentialSourceLabel(account.source)].filter(Boolean).join(' · '),
     detail: [workspaceLabel(account.accountId), account.reauthRequired ? 'Re-authentication required' : undefined].filter(Boolean).join(' · ') || undefined,
     account
   }));

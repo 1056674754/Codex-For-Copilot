@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { join } from 'node:path';
+import { ContinuationHistoryStore } from './continuationHistoryStore';
 import type { NamespaceTool, ResponseReasoningItem, ResponseUsage } from 'openai/resources/responses/responses';
 import {
   compareResponsesInputHistory,
@@ -13,7 +15,7 @@ import {
   stableSerialize,
   type ResponsesInputMessage
 } from './convertMessages';
-import { ResponsesQuotaExceededError, ResponsesRateLimitedError, toChatLimitError } from './responsesLimitError';
+import { ResponsesOverloadedError, ResponsesQuotaExceededError, ResponsesRateLimitedError, toChatLimitError } from './responsesLimitError';
 import { getProviderConfig, type ProviderConfig } from './config';
 
 import { buildFallbackModel, buildProviderModels, fetchAvailableModels, isProviderModelIdentifier, parseModelIdentifier, type ParsedModelIdentifier, type ResolvedProviderModel } from './models';
@@ -37,7 +39,8 @@ import {
   type ResponseBranchReuseEnvelope,
   type ResponseBranchToolSignatures
 } from './responseBranchStore';
-import { getApiCredentials } from './secrets';
+import { getApiCredentials, getCodexCredentialsForAccount } from './secrets';
+import { accountModelReference, bindModelToAccount, parseAccountModelIdentifier } from './accountModels';
 import type { CodexAuthManager } from './auth/codexAuthManager';
 import { CodexIdentityManager, inputStartsNewTurn } from './codexIdentity';
 import { getCodexCompatibilityProfile, type CodexRequestIdentity } from './codexProtocol';
@@ -202,6 +205,8 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   readonly onDidChangeLanguageModelChatInformation: vscode.Event<void>;
   private readonly modelInfoChangedEmitter = new vscode.EventEmitter<void>();
   private readonly responseBranchStore = new ResponseBranchStore();
+  private readonly continuationHistoryStore?: ContinuationHistoryStore;
+  private readonly markerInstanceId = createHash('sha256').update(`${Date.now()}:${Math.random()}`).digest('hex').slice(0, 12);
   private readonly runtimeAvailability = new RuntimeModelAvailability();
   private readonly identityManager: CodexIdentityManager;
   private readonly pendingReportedToolCalls = new Map<string, ReportedToolCall>();
@@ -232,6 +237,9 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       globalState?: vscode.Memento;
     };
     this.identityManager = new CodexIdentityManager(runtimeContext.globalState ?? createMemoryMemento());
+    if (context.globalStorageUri?.scheme === 'file') {
+      this.continuationHistoryStore = new ContinuationHistoryStore(join(context.globalStorageUri.fsPath, 'continuation-history-v1'));
+    }
     this.onDidChangeLanguageModelChatInformation = this.modelInfoChangedEmitter.event;
     this.context.subscriptions.push(
       this.modelInfoChangedEmitter,
@@ -269,6 +277,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelChatInformation[]> {
     const config = getProviderConfig();
+    const accounts = config.credentialsSource !== 'secretStorage'
+      ? await this.authManager?.listAccounts?.() ?? []
+      : [];
+    if (accounts.length > 0 && this.authManager) {
+      const catalogs = await Promise.all(accounts.map(async (account) => {
+        const credentials = await getCodexCredentialsForAccount(this.authManager!, account.accountKey, false);
+        const models = credentials
+          ? (await this.getAvailableModelCatalog(config, credentials, token)).models
+          : [];
+        return models.map((model) => bindModelToAccount(model.info, account, accounts, config.accountDisplayNames));
+      }));
+      return catalogs.flat();
+    }
     const credentials = await getApiCredentials(this.context, this.authManager);
 
     this.outputChannel.debug('provideLanguageModelChatInformation start', {
@@ -320,24 +341,61 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     token: vscode.CancellationToken
   ): Promise<void> {
     const requestLogger = this.logger.operation('chat.response');
+    try {
+      await this.runLanguageModelChatResponse(model, messages, options, progress, token, requestLogger);
+    } catch (error) {
+      requestLogger.error('request.failed', { selectedModelId: model.id, error });
+      throw error;
+    }
+  }
+
+  private async runLanguageModelChatResponse(
+    model: vscode.LanguageModelChatInformation,
+    messages: readonly vscode.LanguageModelChatRequestMessage[],
+    options: vscode.ProvideLanguageModelChatResponseOptions,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+    requestLogger: CodexLogger
+  ): Promise<void> {
     const latency = new CodexLatencyRecorder();
     const config = getProviderConfig();
-    const credentials = await getApiCredentials(this.context, this.authManager);
+    const credentials = await this.getCredentialsForModel(model.id);
     latency.mark('credentialsResolved');
+    requestLogger.info('request.credentials-resolved', {
+      accountKey: credentials?.accountKey,
+      selectedModelId: model.id,
+      credentialSource: credentials?.source,
+      accountBound: Boolean(parseAccountModelIdentifier(model.id).accountReference)
+    });
 
     if (!credentials) {
       throw new Error('Codex credentials are missing. Run "Codex for Copilot: Import Codex auth.json".');
     }
 
     const convertedMessages = convertMessagesToResponsesInputWithStatefulMarker(messages);
+    const markerFailure = (reason: string): Error => {
+      requestLogger.warn('stateful continuation cannot be recovered', {
+        reason,
+        providerInstance: this.markerInstanceId,
+        modelId: model.id,
+        inputCount: convertedMessages.input.length,
+        markerKind: convertedMessages.statefulMarker.kind,
+        responseDigest: convertedMessages.statefulMarker.kind === 'valid'
+          ? createHash('sha256').update(convertedMessages.statefulMarker.previousResponseId).digest('hex').slice(0, 16)
+          : undefined
+      });
+      const error = new Error(`${STATEFUL_MARKER_LOCAL_ERROR} [${reason}] The marker replaces earlier conversation history; retrying the same request cannot restore it. Start a new session or resend the complete history.`);
+      error.name = 'StatefulContinuationError';
+      return error;
+    };
     if (convertedMessages.statefulMarker.kind === 'invalid'
       && convertedMessages.statefulMarker.isLeadingStandalone) {
-      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+      throw markerFailure(`invalid-marker-${convertedMessages.statefulMarker.reason}`);
     }
     if (convertedMessages.statefulMarker.kind === 'valid'
       && convertedMessages.statefulMarker.isLeadingStandalone
       && convertedMessages.statefulMarker.modelId !== model.id) {
-      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+      throw markerFailure('model-mismatch');
     }
 
     const authIdentity = getCredentialIdentity(credentials);
@@ -380,7 +438,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     );
     const reasoningEffort = reasoning.effort;
     const requestStartedAt = latency.entryAt;
-    const input = convertedMessages.input;
+    let input = convertedMessages.input;
     const observedToolResults = this.consumeReportedToolResults(input);
     latency.mark('messagesConverted');
     const requestBuildStartedAt = performance.now();
@@ -492,7 +550,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     });
     latency.recordContext({ requestBuildMs: Math.max(0, performance.now() - requestBuildStartedAt) });
     const statefulMarker = convertedMessages.statefulMarker;
-    const markerHint = statefulMarker.kind === 'valid'
+    let markerHint = statefulMarker.kind === 'valid'
       && statefulMarker.isLeadingStandalone
       ? {
           responseId: statefulMarker.previousResponseId,
@@ -501,6 +559,18 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       : undefined;
     const useHistoryFallback = !markerHint
       && (statefulMarker.kind === 'none' || !statefulMarker.isLeadingStandalone);
+    if (markerHint && config.persistContinuationHistory && this.continuationHistoryStore
+      && !this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
+      && this.responseBranchStore.explainMarkerMiss(reuseEnvelope, input, markerHint) !== 'invalidated') {
+      const restored = await this.continuationHistoryStore.load(model.id, reuseEnvelope.scopeKey, markerHint.responseId);
+      if (restored.status === 'restored') {
+        this.responseBranchStore.restoreBranch(restored.branch);
+      }
+      requestLogger.info('stateful shared history lookup', {
+        status: restored.status, providerInstance: this.markerInstanceId, modelId: model.id,
+        responseDigest: createHash('sha256').update(markerHint.responseId).digest('hex').slice(0, 16)
+      });
+    }
     const candidateReusableBranch = markerHint
       ? this.responseBranchStore.findReusableBranch(reuseEnvelope, input, markerHint)
       : useHistoryFallback
@@ -519,7 +589,23 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         ? candidateReusableBranch
         : undefined;
     if (markerHint && !reusableBranch) {
-      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+      const reason = this.responseBranchStore.explainMarkerMiss(reuseEnvelope, input, markerHint);
+      requestLogger.warn('stateful marker branch lookup missed', {
+        reason, providerInstance: this.markerInstanceId, modelId: model.id,
+        requestModel: selectedModel.requestModel,
+        responseDigest: createHash('sha256').update(markerHint.responseId).digest('hex').slice(0, 16),
+        envelopeDigest: createHash('sha256').update(reuseEnvelope.identityKey).digest('hex').slice(0, 16)
+      });
+      const snapshot = this.responseBranchStore.findMarkerReplaySnapshot(reuseEnvelope, markerHint);
+      if (!snapshot || snapshot.fullRequest.model !== requestOptions.model
+        || !hasCanonicalReplayContinuationIntegrity(snapshot.responseItems, markerHint.incrementalInput)) {
+        throw markerFailure(`branch-miss:${reason}`);
+      }
+      input = buildCanonicalReplayInput({ previousSnapshot: snapshot, convertedInput: input, appendedInput: markerHint.incrementalInput });
+      requestLogger.info('stateful continuation recovered with complete local replay', {
+        reason, providerInstance: this.markerInstanceId, modelId: model.id, inputCount: input.length
+      });
+      markerHint = undefined;
     }
     const reuseMissDiagnostic = reusableBranch || markerHint
       ? undefined
@@ -535,7 +621,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       : undefined;
     if (isMarkerContinuation && (!markerContinuationSnapshot
       || !hasCanonicalReplayContinuationIntegrity(markerContinuationSnapshot.responseItems, appendedInput))) {
-      throw new Error(STATEFUL_MARKER_LOCAL_ERROR);
+      throw markerFailure('snapshot-integrity');
     }
     const markerCanonicalReplayInput = isMarkerContinuation
       ? buildCanonicalReplayInput({
@@ -1087,8 +1173,17 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           if (metrics.retryReason === 'websocket_unauthorized_recovered'
             || metrics.retryReason === 'websocket_connection_limit_reached'
             || metrics.retryReason === 'websocket_prewarm_continuation_miss'
+            || metrics.retryReason === 'stream_server_overloaded'
             || metrics.retryReason === 'stream_rate_limit_exceeded') {
             resetAttemptState();
+          }
+          if (metrics.retryReason === 'stream_server_overloaded') {
+            requestLogger.warn('retrying transient server failure', {
+              requestModel: selectedModel.requestModel,
+              retryAttempt: metrics.retryAttempt,
+              retryDelayMs: metrics.retryDelayMs,
+              maxRetries: config.maxRetries
+            });
           }
           previousResponseIdUsed ||= metrics.previousResponseIdUsed === true;
           if (typeof metrics.websocketConnectedAt === 'number') {
@@ -1212,6 +1307,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
           await streamResponseText(streamOptions);
         } catch (error) {
           resetAttemptState();
+          if (error instanceof ResponsesOverloadedError) {
+            requestLogger.warn('response server overloaded', { error });
+            throw toChatLimitError(error);
+          }
           if (error instanceof ResponsesQuotaExceededError || error instanceof ResponsesRateLimitedError) {
             requestLogger.warn('response limit reached', { error });
             void this.accountUsageRefreshSink?.refresh();
@@ -1447,7 +1546,22 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
         continuationSnapshotMs,
         continuationStoreMs: Math.max(0, performance.now() - continuationStoreStartedAt)
       });
-      if (!token.isCancellationRequested && !this.responseBranchStore.isReuseDisabled(reuseEnvelope)) {
+      const savedBranch = this.responseBranchStore.exportBranch(activeBranchId);
+      const historySaved = config.persistContinuationHistory && savedBranch && this.continuationHistoryStore
+        ? await this.continuationHistoryStore.save(model.id, savedBranch)
+        : false;
+      if (config.persistContinuationHistory && !historySaved) {
+        requestLogger.warn('stateful marker withheld: shared history unavailable', {
+          providerInstance: this.markerInstanceId, modelId: model.id
+        });
+      }
+      if (historySaved && !token.isCancellationRequested && !this.responseBranchStore.isReuseDisabled(reuseEnvelope)) {
+        requestLogger.info('stateful marker emitted', {
+          providerInstance: this.markerInstanceId, modelId: model.id,
+          requestModel: selectedModel.requestModel,
+          responseDigest: createHash('sha256').update(finalResponseId!).digest('hex').slice(0, 16),
+          envelopeDigest: createHash('sha256').update(reuseEnvelope.identityKey).digest('hex').slice(0, 16)
+        });
         progress.report(createStatefulMarkerDataPart(statefulMarkerPayload));
       }
     } else if (finalResponseId) {
@@ -1509,9 +1623,10 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
   }
 
   private handleConnectionConfiguration(config: ProviderConfig, authIdentity: string): void {
+    // Connections already include account and token identity in their pool scope.
+    // A concurrent request for another account must not close in-flight sockets.
     const key = stableSerialize({
       baseURL: normalizeBaseURL(config.baseURL),
-      authIdentity,
       transport: config.transport,
       websocketPrewarm: config.websocketPrewarm,
       requestCompression: config.requestCompression,
@@ -1594,7 +1709,7 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
     }
 
     try {
-      const credentials = await getApiCredentials(this.context, this.authManager);
+      const credentials = await this.getCredentialsForModel(model.id);
       if (!credentials) {
         const estimated = this.estimateTokenCountLocally(text);
         this.logLocalTokenEstimateDiagnosticOnce({
@@ -1727,6 +1842,19 @@ export class CodexModelProvider implements vscode.LanguageModelChatProvider {
       reason: options.reason,
       subsequentOccurrencesSuppressed: true
     });
+  }
+
+  private async getCredentialsForModel(modelId: string) {
+    const { accountReference } = parseAccountModelIdentifier(modelId);
+    if (!accountReference) {
+      return getApiCredentials(this.context, this.authManager);
+    }
+    const accounts = await this.authManager?.listAccounts?.() ?? [];
+    const account = accounts.find((candidate) => accountModelReference(candidate.accountKey) === accountReference);
+    if (!account) {
+      throw new Error('The account bound to this Codex model is no longer available. Select an account-labelled model again.');
+    }
+    return getApiCredentials(this.context, this.authManager, account.accountKey);
   }
 
   private async getAvailableModelCatalog(

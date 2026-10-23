@@ -3,7 +3,7 @@
   "displayName": "Codex For Copilot (Song Patched)",
   "description": "A lightweight VS Code Language Model Provider for the ChatGPT Codex Responses backend.",
   "icon": "assets/codex-for-copilot.png",
-  "version": "1.9.8",
+  "version": "1.9.8-local.4",
   "publisher": "song-local",
   "license": "MIT",
   "repository": {
@@ -35,7 +35,7 @@
     "test:benchmark-backend": "node test/benchmarkBackend.mjs",
     "test:benchmark-provider": "node test/benchmarkProviderBackend.mjs",
     "test:codex-parity": "node test/smokeCodexProtocol.mjs && node test/smokeCodexIdentity.mjs && node test/smokeCodexRequestBuilder.mjs && node test/smokeHostedWebSearch.mjs && node test/smokeWebSearchFallback.mjs && node test/smokeCodexToolSchemaCache.mjs && node test/smokeCodexTurnLifecycle.mjs && node test/smokeCodexHttpLifecycle.mjs && node test/smokeCodexWebSocketLifecycle.mjs && node test/smokeCodexWebSocketListenerOrdering.mjs && node test/smokeCodexPreconnection.mjs && node test/smokeCodexPrewarmBudget.mjs && node test/smokeCodexCancellation.mjs && node test/smokeCodexFallback.mjs && node test/smokeCodexCompression.mjs && node test/smokeNativeToolPolicy.mjs && node test/smokeNativeToolCatalog.mjs && node test/smokeNativeToolNamespaces.mjs && node test/smokeNativeToolCallMapper.mjs && node test/smokeNativeToolSearchEvents.mjs && node test/smokeNativeToolSearchLogging.mjs && node test/smokeNativeToolContinuation.mjs && node test/smokeNativeToolFallback.mjs && node test/smokeNativeToolOptIn.mjs && node test/smokeNativeToolGroupingBridge.mjs && node test/smokeNativeToolSearchStatus.mjs",
-    "test:smoke": "npm run test:codex-parity && node test/smokeCodexLogger.mjs && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeAccountUsage.mjs && node test/smokeAuth.mjs",
+    "test:smoke": "npm run test:codex-parity && node test/smokeCodexLogger.mjs && node test/smokeReasoningEffort.mjs && node test/smokeCodexLatency.mjs && node test/smokeStreamPresenter.mjs && node test/smokeReasoningStreamPresenter.mjs && node test/smokeCodexModelCache.mjs && node test/smokeResponsesClient.mjs && node test/smokeProviderFallback.mjs && node test/smokeConversationReuse.mjs && node test/smokeContinuationHistory.mjs && node test/smokeAccountUsage.mjs && node test/smokeAccountModels.mjs && node test/smokeAuth.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },
@@ -160,6 +160,10 @@
         "title": "Codex for Copilot: Add Codex Account"
       },
       {
+        "command": "codexForCopilot.auth.renameAccount",
+        "title": "Codex for Copilot: Rename Account"
+      },
+      {
         "command": "codexForCopilot.auth.switchAccount",
         "title": "Codex for Copilot: Switch Codex Account"
       },
@@ -207,6 +211,16 @@
           ],
           "description": "Select which credential source the provider uses."
         },
+        "codexModelProvider.accountDisplayNames": {
+          "type": "object",
+          "scope": "application",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "markdownDescription": "Account display-name data keyed by stable account reference. Use Codex for Copilot: Rename Account to edit it by selecting an account. No email matching is used. Full emails remain in tooltips; model IDs and routing are unchanged."
+        },
         "codexModelProvider.accountUsageShowAccountName": {
           "type": "boolean",
           "default": false,
@@ -230,12 +244,18 @@
           ],
           "description": "Transport policy used for Responses streaming requests."
         },
+        "codexModelProvider.persistContinuationHistory": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Opt in to private local conversation snapshots shared by VS Code windows for Agent Host continuation recovery. Includes prompts and tool results, not credentials. Retained for up to 7 days, with a 256 MiB total limit and 64 MiB per snapshot. When disabled, new stateful markers are not emitted; full chat history remains with the client."
+        },
         "codexModelProvider.maxRetries": {
           "type": "number",
           "default": 15,
           "minimum": 0,
           "maximum": 15,
-          "description": "Maximum retry count for transient connection, timeout, rate-limit, 5xx, and in-stream server-overload failures before visible output is emitted. Server-overload retries wait at least 10 seconds between attempts."
+          "description": "Maximum retry count for transient connection, timeout, rate-limit, 5xx, and in-stream server-overload failures before visible output is emitted. Server failures share a bounded retry budget and wait 10, 20, 40, 80, then 120 seconds between attempts (capped at two minutes). Requests with visible output are never replayed."
         },
         "codexModelProvider.websocketPrewarm": {
           "type": "string",

@@ -444,6 +444,13 @@ function runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore) {
     }), undefined, `${compatibilityCase.label} rejects an exact marker`);
   }
 
+  const replayHint = { responseId: 'resp_marker_exact', incrementalInput: currentInput };
+  assertEqual(Boolean(store.findMarkerReplaySnapshot({ ...envelope, requestFingerprint: 'new-instructions' }, replayHint)), true, 'complete snapshot supports envelope-change replay');
+  assertEqual(store.findMarkerReplaySnapshot({ ...envelope, scopeKey: 'another-account' }, replayHint), undefined, 'replay cannot cross account or endpoint');
+  assertEqual(store.findMarkerReplaySnapshot({ ...envelope, toolSignatures: { read_file: 'changed' } }, replayHint), undefined, 'replay rejects changed tools');
+  assertEqual(store.explainMarkerMiss(envelope, currentInput, { ...replayHint, responseId: 'missing' }), 'unknown-response-or-provider-restart', 'unknown marker diagnostic distinguishes missing state');
+  assertEqual(store.explainMarkerMiss({ ...envelope, requestFingerprint: 'new-instructions' }, currentInput, replayHint), 'request-envelope-changed', 'envelope miss is diagnosed');
+
   store.disableReuse(envelope, false);
   assertEqual(store.findReusableBranch(envelope, currentInput, {
     responseId: 'resp_marker_exact',
@@ -465,9 +472,19 @@ function runStatefulMarkerBranchStoreSmokeTest(ResponseBranchStore) {
       responseId: 'resp_marker_expired',
       incrementalInput: currentInput
     }), undefined, 'expired exact marker fails closed');
+    const expiredHint = { responseId: 'resp_marker_expired', incrementalInput: currentInput };
+    assertEqual(expiredStore.explainMarkerMiss(envelope, currentInput, expiredHint), 'expired', 'expired marker has an explicit diagnostic');
+    assertEqual(expiredStore.findMarkerReplaySnapshot(envelope, expiredHint), undefined, 'expired state never becomes a delta-only replay');
   } finally {
     Date.now = originalNow;
   }
+
+  const capacityStore = new ResponseBranchStore(600000, 1);
+  capacityStore.recordSuccess(envelope, previousInput, 'resp_capacity_first');
+  capacityStore.recordSuccess(envelope, previousInput, 'resp_capacity_second');
+  assertEqual(capacityStore.explainMarkerMiss(envelope, currentInput, { responseId: 'resp_capacity_first', incrementalInput: currentInput }), 'capacity', 'capacity eviction is diagnosed');
+  capacityStore.invalidateResponseId('resp_capacity_second');
+  assertEqual(capacityStore.explainMarkerMiss(envelope, currentInput, { responseId: 'resp_capacity_second', incrementalInput: currentInput }), 'invalidated', 'explicit invalidation is diagnosed');
 
   const incompleteStore = new ResponseBranchStore();
   const incompleteState = createCompletedBranchState(envelope, previousInput, 'resp_marker_incomplete');

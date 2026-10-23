@@ -13,6 +13,8 @@ const repoImport = (relativePath) => JSON.stringify(join(process.cwd(), relative
 const require = createRequire(import.meta.url);
 const moduleLoad = Module._load;
 const nativeFetch = globalThis.fetch;
+let legacyAuthReads = 0;
+let quickPickHandler;
 class EventEmitter {
   constructor() {
     this.listeners = new Set();
@@ -31,9 +33,23 @@ class EventEmitter {
   }
 }
 Module._load = function patchedLoad(request, parent, isMain) {
+  if (request === 'node:fs/promises') {
+    const nativeFs = moduleLoad.call(this, request, parent, isMain);
+    return {
+      ...nativeFs,
+      async readFile(path, ...args) {
+        if (String(path).endsWith('/.codex/auth.json')) {
+          legacyAuthReads += 1;
+          return JSON.stringify({ tokens: { access_token: 'cli-fallback-a-token', account_id: 'cli-fallback-a' } });
+        }
+        return nativeFs.readFile(path, ...args);
+      }
+    };
+  }
   if (request === 'vscode') {
     return {
       workspace: {
+        getConfiguration: () => ({ get: (_key, fallback) => fallback }),
         fs: {
           stat: async (uri) => {
             const fileStat = await stat(uri.fsPath);
@@ -44,8 +60,13 @@ Module._load = function patchedLoad(request, parent, isMain) {
           }
         }
       },
-      window: { showErrorMessage: async () => undefined, showInformationMessage: async () => undefined },
+      window: {
+        showErrorMessage: async () => undefined,
+        showInformationMessage: async () => undefined,
+        showQuickPick: async (items, options) => quickPickHandler?.(items, options)
+      },
       commands: { executeCommand: async () => undefined },
+      QuickPickItemKind: { Separator: -1 },
       EventEmitter
     };
   }
@@ -65,6 +86,7 @@ export * from ${repoImport('src/auth/codexOAuthClient')};
 export * from ${repoImport('src/auth/codexAuthenticationProvider')};
 export * from ${repoImport('src/auth/codexLoopbackLogin')};
 export * from ${repoImport('src/secrets')};
+export * from ${repoImport('src/accountUsageStatusBar')};
 `));
 
 await build({
@@ -79,6 +101,25 @@ await build({
 
 try {
   const auth = require(bundlePath);
+  const credentialFailure = new Error('Selected account B requires reauthentication');
+  const failingSelectedAccount = {
+    async getCredentialSnapshot() { throw credentialFailure; },
+    async getActiveAccountKey() { return 'selected-account-b'; }
+  };
+  for (const accountKey of [undefined, 'selected-account-b']) {
+    let error;
+    const readsBefore = legacyAuthReads;
+    try {
+      await auth.getApiCredentials({ secrets: { async get() { throw new Error('Must not fall back to an API key'); } } }, failingSelectedAccount, accountKey);
+    } catch (caught) {
+      error = caught;
+    }
+    assertEqual(error, credentialFailure, 'selected account errors propagate instead of silently changing account');
+    assertEqual(legacyAuthReads, readsBefore, 'a selected account failure never reads CLI fallback credentials');
+  }
+  const fallbackCredentials = await auth.getApiCredentials({}, { async getCredentialSnapshot() { throw new Error('No account'); }, async getActiveAccountKey() { return undefined; } });
+  assertEqual(fallbackCredentials.apiKey, 'cli-fallback-a-token', 'CLI fallback remains available when no stored account is selected');
+  assertEqual(fallbackCredentials.headers['ChatGPT-Account-ID'], 'cli-fallback-a', 'unconfigured legacy fallback preserves its own workspace');
   const futureToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, email: 'user@example.com' });
   const soonToken = jwt({ exp: Math.floor(Date.now() / 1000) + 60 });
   const valid = auth.parseCodexAuthJson(JSON.stringify({
@@ -443,6 +484,149 @@ try {
   assertEqual(new Set(multiAccountSessions.map((session) => session.id)).size, 3, 'stored owners produce distinct VS Code authentication session IDs');
   multiAccountProvider.dispose();
   multiAccountManager.dispose();
+
+  const workspaceAState = createWorkspaceState();
+  const workspaceBState = createWorkspaceState();
+  const workspaceA = createImportedManager(auth, multiAccountSecrets, workspaceAState);
+  const workspaceB = createImportedManager(auth, multiAccountSecrets, workspaceBState);
+  const legacySelection = createImportedManager(auth, multiAccountSecrets);
+  assertEqual(await workspaceA.getActiveAccountKey(), userBKey, 'workspace A seeds its selection from the legacy active account');
+  assertEqual(await workspaceB.getActiveAccountKey(), userBKey, 'workspace B independently seeds its selection from the legacy active account');
+  await legacySelection.switchAccount(userAKey);
+  assertEqual(await workspaceA.getActiveAccountKey(), userBKey, 'an initialized workspace no longer follows legacy global switches');
+  assertEqual(await workspaceB.getActiveAccountKey(), userBKey, 'legacy switches do not change another initialized workspace');
+  const sharedIndexBeforeSwitch = multiAccountSecrets.get('codexForCopilot.codexAuthAccounts');
+  const sharedActiveBeforeSwitch = multiAccountSecrets.get('codexForCopilot.codexActiveAccount');
+  const workspaceAEvents = [];
+  const workspaceBEvents = [];
+  workspaceA.onDidChangeAuth((event) => workspaceAEvents.push(event));
+  workspaceB.onDidChangeAuth((event) => workspaceBEvents.push(event));
+  await workspaceA.switchAccount(userAKey);
+  assertEqual(await workspaceA.getActiveAccountKey(), userAKey, 'workspace A switches to user A');
+  assertEqual(await workspaceB.getActiveAccountKey(), userBKey, 'workspace A switching leaves workspace B on user B');
+  assertEqual(multiAccountSecrets.get('codexForCopilot.codexAuthAccounts'), sharedIndexBeforeSwitch, 'workspace switching does not rewrite the shared account index');
+  assertEqual(multiAccountSecrets.get('codexForCopilot.codexActiveAccount'), sharedActiveBeforeSwitch, 'workspace switching does not rewrite the legacy active secret');
+  assertEqual(workspaceAEvents.filter((event) => event.reason === 'activeAccountChanged').length, 1, 'workspace switching emits local cache invalidation');
+  assertEqual(workspaceBEvents.length, 0, 'workspace switching does not invalidate another workspace');
+  await workspaceA.switchAccount(userAKey);
+  assertEqual(workspaceAEvents.length, 1, 'reselecting the workspace account does not invalidate caches');
+  await assertRejects(() => workspaceA.switchAccount('missing-account'), 'unknown workspace account cannot be selected');
+  assertEqual(await workspaceA.getActiveAccountKey(), userAKey, 'a rejected switch retains the workspace selection');
+
+  workspaceA.dispose();
+  const reopenedWorkspaceA = createImportedManager(auth, multiAccountSecrets, workspaceAState);
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), userAKey, 'reopening a workspace restores its saved account');
+  assertEqual((await reopenedWorkspaceA.getStatus()).accountKey, userAKey, 'auth status follows the reopened workspace selection');
+  assertEqual((await reopenedWorkspaceA.listAccounts()).find((account) => account.isActive)?.accountKey, userAKey, 'account picker marks the workspace-local active account');
+  assertEqual((await workspaceB.listAccounts()).find((account) => account.isActive)?.accountKey, userBKey, 'another workspace marks its own active account');
+  const [workspaceACredentials, workspaceBCredentials] = await Promise.all([
+    auth.getApiCredentials({}, reopenedWorkspaceA),
+    auth.getApiCredentials({}, workspaceB)
+  ]);
+  assertEqual(workspaceACredentials.accountKey, userAKey, 'provider credentials are pinned to workspace A');
+  assertEqual(workspaceACredentials.apiKey, 'user-a-new-token', 'workspace A sends user A token');
+  assertEqual(workspaceBCredentials.accountKey, userBKey, 'provider credentials are pinned to workspace B');
+  assertEqual(workspaceBCredentials.apiKey, 'user-b-token', 'workspace B sends user B token');
+  assertEqual(workspaceACredentials.headers['ChatGPT-Account-ID'], 'workspace-1', 'workspace A preserves the remote workspace header');
+  assertEqual(workspaceBCredentials.headers['ChatGPT-Account-ID'], 'workspace-1', 'different owners of one remote workspace remain independently selectable');
+  const usagePicker = Object.create(auth.CodexAccountUsageStatusBar.prototype);
+  usagePicker.authManager = reopenedWorkspaceA;
+  usagePicker.usageByAccount = new Map([
+    [userAKey, { accountKey: userAKey, label: 'a@example.com', isActive: true, error: true }],
+    [userBKey, { accountKey: userBKey, label: 'b@example.com', isActive: false, error: true }]
+  ]);
+  let renderedUsageAccount;
+  usagePicker.renderActive = () => {
+    renderedUsageAccount = [...usagePicker.usageByAccount.values()].find((entry) => entry.isActive)?.accountKey;
+  };
+  quickPickHandler = (items, options) => {
+    assertEqual(options.placeHolder.includes('this workspace'), true, 'usage account picker explains selection scope');
+    assertEqual(items.find((item) => item.accountKey === userAKey).description, 'workspace default', 'usage picker marks the local default account');
+    return items.find((item) => item.accountKey === userBKey);
+  };
+  await usagePicker.showDetails();
+  quickPickHandler = undefined;
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), userBKey, 'usage picker switches the current workspace account');
+  assertEqual(renderedUsageAccount, userBKey, 'usage picker immediately renders the newly selected account');
+  await workspaceB.switchAccount(userAKey);
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), userBKey, 'another workspace switch leaves the usage-selected account unchanged');
+  await reopenedWorkspaceA.switchAccount(userAKey);
+  await workspaceB.switchAccount(userBKey);
+  await reopenedWorkspaceA.importAuthJson(authJsonFor('user-b', 'workspace-1', 'b@example.com', 'shared-user-b-new-token'));
+  assertEqual((await workspaceB.getCredentialSnapshot()).accessToken, 'shared-user-b-new-token', 'updated credentials remain shared between workspaces');
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), userAKey, 'importing credentials does not replace an existing workspace selection');
+
+  await workspaceB.signOut(userAKey);
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), userBKey, 'a workspace recovers when its account is removed from another workspace');
+  assertEqual(await workspaceB.getActiveAccountKey(), userBKey, 'removing another account retains this workspace selection');
+  const reopenedAfterRemoval = createImportedManager(auth, multiAccountSecrets, workspaceAState);
+  assertEqual(await reopenedAfterRemoval.getActiveAccountKey(), userBKey, 'fallback after removal is persisted for reopening');
+  await reopenedWorkspaceA.signOutAll();
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), undefined, 'signing out all clears the current workspace selection');
+  assertEqual(await workspaceB.getActiveAccountKey(), undefined, 'shared sign-out leaves other workspaces without credentials');
+  const replacementKey = await workspaceB.importAuthJson(userAWorkspaceTwo);
+  assertEqual(await reopenedWorkspaceA.getActiveAccountKey(), replacementKey, 'an empty workspace can select the first newly added shared account');
+  reopenedAfterRemoval.dispose();
+  reopenedWorkspaceA.dispose();
+  workspaceB.dispose();
+  legacySelection.dispose();
+
+  const scopedRefreshSecrets = new Map();
+  const scopedRefreshStore = new auth.CodexSecretStore({
+    async get(key) { return scopedRefreshSecrets.get(key); },
+    async store(key, value) { scopedRefreshSecrets.set(key, value); },
+    async delete(key) { scopedRefreshSecrets.delete(key); }
+  }, createWorkspaceState());
+  let finishScopedRefresh;
+  let notifyScopedRefresh;
+  const scopedRefreshStarted = new Promise((resolve) => { notifyScopedRefresh = resolve; });
+  const scopedRefreshManager = new auth.CodexAuthManager(
+    scopedRefreshStore,
+    () => ({ async withLock(callback) { return callback(); } }),
+    {
+      async refresh() {
+        notifyScopedRefresh();
+        return new Promise((resolve) => { finishScopedRefresh = resolve; });
+      },
+      async revoke() {}
+    }
+  );
+  const scopedRefreshA = await scopedRefreshManager.importAuthJson(authJsonFor('refresh-a', 'remote-a', 'refresh-a@example.com', soonToken));
+  const scopedRefreshB = await scopedRefreshManager.importAuthJson(authJsonFor('refresh-b', 'remote-b', 'refresh-b@example.com', futureToken));
+  const pendingSnapshot = scopedRefreshManager.getCredentialSnapshot();
+  await scopedRefreshStarted;
+  await scopedRefreshManager.switchAccount(scopedRefreshB);
+  finishScopedRefresh({ access_token: futureToken, refresh_token: 'rotated-scoped-a' });
+  assertEqual((await pendingSnapshot).accountKey, scopedRefreshA, 'an in-flight refresh remains pinned to its original workspace account');
+  assertEqual((await scopedRefreshManager.getCredentialSnapshot()).accountKey, scopedRefreshB, 'later requests use the switched workspace account');
+  assertEqual((await scopedRefreshStore.getCredential(scopedRefreshA)).tokens.refresh_token, 'rotated-scoped-a', 'refresh rotation is stored under the original account');
+  assertEqual((await scopedRefreshStore.getCredential(scopedRefreshB)).tokens.refresh_token, 'refresh-b-remote-b-refresh', 'refresh does not overwrite the switched account');
+  scopedRefreshManager.dispose();
+
+  let notifySelectionRead;
+  let finishSelectionRead;
+  let pauseSelectionRead = true;
+  const selectionReadStarted = new Promise((resolve) => { notifySelectionRead = resolve; });
+  const selectionReadGate = new Promise((resolve) => { finishSelectionRead = resolve; });
+  const selectionReadState = createWorkspaceState();
+  await selectionReadState.update('codexForCopilot.activeAccountKey', scopedRefreshB);
+  const selectionReadStore = new auth.CodexSecretStore({
+    async get(key) {
+      if (pauseSelectionRead && key === `codexForCopilot.codexAuthAccount.${scopedRefreshB}`) {
+        pauseSelectionRead = false;
+        notifySelectionRead();
+        await selectionReadGate;
+      }
+      return scopedRefreshSecrets.get(key);
+    },
+    async store(key, value) { scopedRefreshSecrets.set(key, value); },
+    async delete(key) { scopedRefreshSecrets.delete(key); }
+  }, selectionReadState);
+  const pendingSelection = selectionReadStore.getActiveAccountKey();
+  await selectionReadStarted;
+  await selectionReadStore.setActiveAccountKey(scopedRefreshA);
+  finishSelectionRead();
+  assertEqual(await pendingSelection, scopedRefreshA, 'a delayed account read cannot overwrite a completed workspace switch');
 
   const legacyUserATokens = authJsonTokens('user-a', 'workspace-1', 'a@example.com', 'legacy-user-a-token');
   const legacyV2Secrets = new Map([
@@ -809,13 +993,24 @@ function authJsonTokens(userId, accountId, email, accessToken) {
   };
 }
 
-function createImportedManager(authApi, secrets) {
+function createWorkspaceState() {
+  const values = new Map();
+  return {
+    get(key, fallback) { return values.has(key) ? values.get(key) : fallback; },
+    async update(key, value) {
+      if (value === undefined) values.delete(key);
+      else values.set(key, value);
+    }
+  };
+}
+
+function createImportedManager(authApi, secrets, workspaceState) {
   return new authApi.CodexAuthManager(
     new authApi.CodexSecretStore({
       async get(key) { return secrets.get(key); },
       async store(key, value) { secrets.set(key, value); },
       async delete(key) { secrets.delete(key); }
-    }),
+    }, workspaceState),
     () => ({ async withLock(callback) { return callback(); } }),
     { async refresh() { throw new Error('multi-account test credentials must not refresh'); }, async revoke() {} }
   );

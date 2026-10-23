@@ -77,7 +77,7 @@ interface DisabledResponseBranchReuse {
   enableAfterFullInputSuccess: boolean;
 }
 
-interface ResponseBranchEntry {
+export interface ResponseBranchEntry {
   id: string;
   envelope: ResponseBranchReuseEnvelope;
   input: ResponsesInputMessage[];
@@ -92,6 +92,58 @@ export class ResponseBranchStore {
   private readonly branches = new Map<string, ResponseBranchEntry>();
   private readonly disabledReuseKeys = new Map<string, DisabledResponseBranchReuse>();
   private nextBranchId = 1;
+  private readonly removals = new Map<string, 'expired' | 'capacity' | 'invalidated'>();
+
+  explainMarkerMiss(envelope: ResponseBranchReuseEnvelope, input: readonly ResponsesInputMessage[], hint: ResponseBranchMarkerHint): string {
+    this.evictExpiredEntries();
+    const branch = [...this.branches.values()].find((entry) => entry.responseId === hint.responseId);
+    if (!branch) {
+      return this.removals.get(hint.responseId) ?? 'unknown-response-or-provider-restart';
+    }
+    if (branch.envelope.scopeKey !== envelope.scopeKey) { return 'credential-or-endpoint-changed'; }
+    if (this.disabledReuseKeys.has(envelope.identityKey)) { return 'reuse-disabled'; }
+    if (!haveEquivalentResponsesInput(hint.incrementalInput, input) || !hint.incrementalInput.length) { return 'invalid-delta'; }
+    if (!compareToolSignatures(branch.envelope.toolSignatures, envelope.toolSignatures).compatible) { return 'tools-changed'; }
+    if (!hasMatchingRequestFingerprint(branch, envelope)) { return 'request-envelope-changed'; }
+    if (!hasCompatibleInputBudget(branch.envelope.effectiveInputBudget, envelope.effectiveInputBudget)) { return 'input-budget-changed'; }
+    return 'snapshot-integrity';
+  }
+
+  findMarkerReplaySnapshot(envelope: ResponseBranchReuseEnvelope, hint: ResponseBranchMarkerHint): CodexContinuationSnapshot | undefined {
+    this.evictExpiredEntries();
+    const branch = [...this.branches.values()].find((entry) => entry.responseId === hint.responseId);
+    // Replay is separate from server-side reuse: never carry state across credentials or tool catalogs.
+    if (!branch || branch.envelope.scopeKey !== envelope.scopeKey
+      || branch.envelope.catalogHash !== envelope.catalogHash
+      || branch.envelope.toolPlanMode !== envelope.toolPlanMode
+      || !compareToolSignatures(branch.envelope.toolSignatures, envelope.toolSignatures).compatible
+      || !hasMarkerContinuationIntegrity(branch, hint.incrementalInput)) {
+      return undefined;
+    }
+    const snapshot = branch.state!.continuation!;
+    if (snapshot.fullRequest.previous_response_id) { return undefined; }
+    return cloneCodexContinuationSnapshot(snapshot);
+  }
+
+  exportBranch(branchId: string): ResponseBranchEntry | undefined {
+    const branch = this.branches.get(branchId);
+    return branch ? structuredClone(branch) : undefined;
+  }
+
+  restoreBranch(branch: ResponseBranchEntry): void {
+    const id = `branch_${this.nextBranchId++}`;
+    this.branches.set(id, { ...structuredClone(branch), id, updatedAt: Date.now() });
+    this.evictOverflow();
+  }
+
+  private removeBranch(branchId: string, reason: 'expired' | 'capacity' | 'invalidated'): void {
+    const branch = this.branches.get(branchId);
+    if (branch) {
+      this.removals.set(branch.responseId, reason);
+      while (this.removals.size > 128) { this.removals.delete(this.removals.keys().next().value!); }
+      this.branches.delete(branchId);
+    }
+  }
 
   constructor(
     private readonly ttlMs = 10 * 60 * 1000,
@@ -306,13 +358,13 @@ export class ResponseBranchStore {
   }
 
   invalidate(branchId: string): void {
-    this.branches.delete(branchId);
+    this.removeBranch(branchId, 'invalidated');
   }
 
   invalidateResponseId(responseId: string): void {
     for (const [branchId, branch] of this.branches.entries()) {
       if (branch.responseId === responseId) {
-        this.branches.delete(branchId);
+        this.removeBranch(branchId, 'invalidated');
       }
     }
   }
@@ -344,7 +396,7 @@ export class ResponseBranchStore {
 
     for (const [branchId, branch] of this.branches.entries()) {
       if (now - branch.updatedAt > this.ttlMs) {
-        this.branches.delete(branchId);
+        this.removeBranch(branchId, 'expired');
       }
     }
 
@@ -366,7 +418,7 @@ export class ResponseBranchStore {
     while (this.branches.size > this.maxBranches && branchesByAge.length > 0) {
       const oldest = branchesByAge.shift();
       if (oldest) {
-        this.branches.delete(oldest.id);
+        this.removeBranch(oldest.id, 'capacity');
       }
     }
   }

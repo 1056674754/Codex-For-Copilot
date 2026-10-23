@@ -33,6 +33,7 @@ export interface ProviderConfig {
   websocketPrewarm: 'auto' | 'enabled' | 'disabled';
   requestCompression: 'auto' | 'enabled' | 'disabled';
   enablePromptCacheKey: boolean;
+  persistContinuationHistory: boolean;
   protocol: CodexProtocolSettings;
   requestIdentity: RequestIdentitySettings;
   nativeToolSearch: 'auto' | 'enabled' | 'disabled';
@@ -46,6 +47,7 @@ export interface ProviderConfig {
   defaultServiceTier?: 'default' | 'fast';
   defaultReasoningEffort?: KnownReasoningEffort;
   accountUsageShowAccountName: boolean;
+  accountDisplayNames: Record<string, string>;
   maxOutputTokens: number;
   modelPricingUsdPerMTok: Record<string, ModelPricing>;
 }
@@ -62,6 +64,7 @@ export function getProviderConfig(): ProviderConfig {
     websocketPrewarm: normalizeTriState(config.get('websocketPrewarm', 'auto')),
     requestCompression: normalizeTriState(config.get('requestCompression', 'auto')),
     enablePromptCacheKey: config.get('enablePromptCacheKey', false),
+    persistContinuationHistory: config.get('persistContinuationHistory', false),
     protocol: {
       profile: normalizeProtocolProfile(config.get('protocolProfile', 'auto')),
       headerOverrides: normalizeStringRecord(config.get('headerOverrides', {}), 32, 1024),
@@ -93,6 +96,7 @@ export function getProviderConfig(): ProviderConfig {
     defaultServiceTier: normalizeDefaultServiceTier(config.get('defaultServiceTier', 'auto')),
     defaultReasoningEffort: normalizeDefaultReasoningEffort(config.get('defaultReasoningEffort', 'auto')),
     accountUsageShowAccountName: config.get('accountUsageShowAccountName', false),
+    accountDisplayNames: config.get('accountDisplayNames', {}),
     maxOutputTokens: config.get('maxOutputTokens', 8192),
     modelPricingUsdPerMTok: normalizeModelPricing(config.get('modelPricingUsdPerMTok', {}))
   };

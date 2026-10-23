@@ -22,7 +22,13 @@ export async function getApiKey(context: vscode.ExtensionContext, authManager?: 
   return (await getApiCredentials(context, authManager))?.apiKey;
 }
 
-export async function getApiCredentials(context: vscode.ExtensionContext, authManager?: CodexAuthManager): Promise<ApiCredentials | undefined> {
+export async function getApiCredentials(context: vscode.ExtensionContext, authManager?: CodexAuthManager, accountKey?: string): Promise<ApiCredentials | undefined> {
+  if (accountKey !== undefined) {
+    if (!authManager) {
+      throw new Error('The selected Codex account is unavailable. Select an account-labelled model again.');
+    }
+    return readManagedCodexCredentials(authManager, accountKey);
+  }
   const credentialSource = vscode.workspace.getConfiguration('codexModelProvider').get<'auto' | 'codexAuth' | 'secretStorage'>('credentialsSource', 'auto');
 
   if (credentialSource === 'secretStorage') {
@@ -52,22 +58,12 @@ export async function clearApiKey(context: vscode.ExtensionContext): Promise<voi
 async function readCodexAuthCredentials(authManager?: CodexAuthManager): Promise<ApiCredentials | undefined> {
   if (authManager) {
     try {
-      const snapshot = await authManager.getCredentialSnapshot();
-      const headers: Record<string, string> = { 'User-Agent': DEFAULT_USER_AGENT };
-      if (snapshot.accountId?.trim()) {
-        headers['ChatGPT-Account-ID'] = snapshot.accountId.trim();
+      return await readManagedCodexCredentials(authManager);
+    } catch (error) {
+      // A selected account must never silently turn into the CLI's account.
+      if (await authManager.getActiveAccountKey?.()) {
+        throw error;
       }
-      return {
-        apiKey: snapshot.accessToken,
-        headers,
-        source: 'codexAuth',
-        authManager,
-        accountKey: snapshot.accountKey,
-        kind: 'codexAccessToken',
-        omitMaxOutputTokens: true
-      };
-    } catch {
-      // Fall through to legacy file-based discovery for backwards compatibility.
     }
   }
 
@@ -111,6 +107,23 @@ async function readCodexAuthCredentials(authManager?: CodexAuthManager): Promise
   }
 
   return undefined;
+}
+
+async function readManagedCodexCredentials(authManager: CodexAuthManager, accountKey?: string): Promise<ApiCredentials> {
+  const snapshot = await authManager.getCredentialSnapshot(accountKey);
+  const headers: Record<string, string> = { 'User-Agent': DEFAULT_USER_AGENT };
+  if (snapshot.accountId?.trim()) {
+    headers['ChatGPT-Account-ID'] = snapshot.accountId.trim();
+  }
+  return {
+    apiKey: snapshot.accessToken,
+    headers,
+    source: 'codexAuth',
+    authManager,
+    accountKey: accountKey ?? snapshot.accountKey,
+    kind: 'codexAccessToken',
+    omitMaxOutputTokens: true
+  };
 }
 
 async function readSecretStorageCredentials(context: vscode.ExtensionContext): Promise<ApiCredentials | undefined> {
